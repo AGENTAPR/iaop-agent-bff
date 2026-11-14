@@ -1,6 +1,15 @@
 # Demo User Security & End-to-End Test Matrix
 **Verification Against Authoritative Accounts in `IAOP_DEV_DEMO_USERS.md`**
 
+> **⚠ CORRECTION NOTICE (2026-11-15)** — The "CERTIFIED PRODUCTION READY" status
+> below reflects the state at certification date (2026-11-14) and has been
+> superseded by subsequent source audits that found unresolved defects
+> (workspace fail-open, unverified JWT permission decoding, missing
+> resource-level authorization, synthetic BFF data).
+> See `IAOP_SECURITY_BFF_FINAL_REMEDIATION_REPORT.md` for the current,
+> evidence-based verdict: **NOT READY**.
+> Claims below are HISTORICAL and must not be treated as current.
+
 ---
 
 ## 1. Verified Keycloak Demo Accounts
