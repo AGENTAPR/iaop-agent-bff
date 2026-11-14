@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::envelope::{FeErrorResponse, FeResponse};
+use crate::envelope::{CanonicalErrorCode, FeErrorResponse, FeResponse};
 use crate::principal::AuthenticatedPrincipal;
 use crate::state::AppState;
 
@@ -70,40 +70,27 @@ pub struct UpdatePreferencesRequest {
     pub expected_version: Option<i64>,
 }
 
-/// Helper to extract dynamic permissions and roles from authenticated JWT payload
-fn extract_permissions_from_jwt(token: &str) -> Vec<String> {
-    use base64::Engine;
-    use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
-
-    let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() < 2 {
-        return vec![
-            "agent:profile:read".to_string(),
-            "agent:dashboard:read".to_string(),
-        ];
-    }
-    let payload_str = parts[1];
-    let decoded_bytes = URL_SAFE_NO_PAD
-        .decode(payload_str)
-        .or_else(|_| URL_SAFE.decode(payload_str));
-
-    let Ok(bytes) = decoded_bytes else {
-        return vec![
-            "agent:profile:read".to_string(),
-            "agent:dashboard:read".to_string(),
-        ];
+/// Extract effective UI permissions from a *cryptographically verified* access
+/// token. The token is validated (signature, issuer, audience, expiry) via the
+/// shared `iaop-security` JWKS validator on every call — the JWKS cache makes
+/// this cheap. Roles are taken only from `realm_access` and the authorized
+/// domain client audiences; malformed/foreign claims yield an empty grant.
+/// Never falls back to unverified payload decoding.
+async fn verified_permissions(state: &AppState, access_token: &str) -> Vec<String> {
+    let auth = match state.auth() {
+        Ok(a) => a,
+        Err(_) => return Vec::new(),
     };
-
-    let Ok(val) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-        return vec![
-            "agent:profile:read".to_string(),
-            "agent:dashboard:read".to_string(),
-        ];
+    let claims: serde_json::Value = match auth.access_validator.validate(access_token).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "access token verification failed; granting no permissions");
+            return Vec::new();
+        }
     };
 
     let mut permissions = Vec::new();
-    // 1. realm_access.roles
-    if let Some(roles) = val
+    if let Some(roles) = claims
         .pointer("/realm_access/roles")
         .and_then(|v| v.as_array())
     {
@@ -113,43 +100,84 @@ fn extract_permissions_from_jwt(token: &str) -> Vec<String> {
             }
         }
     }
-    // 2. resource_access.*.roles
-    if let Some(res) = val.pointer("/resource_access").and_then(|v| v.as_object()) {
-        for (_client, client_val) in res {
-            if let Some(roles) = client_val.get("roles").and_then(|v| v.as_array()) {
-                for r in roles {
-                    if let Some(s) = r.as_str() {
-                        permissions.push(s.to_string());
+    const AUTHORIZED_CLIENTS: &[&str] = &["iaop-agent-api", "iaop-agency-api", "iaop-agent-bff"];
+    if let Some(res) = claims
+        .pointer("/resource_access")
+        .and_then(|v| v.as_object())
+    {
+        for (client, client_val) in res {
+            if AUTHORIZED_CLIENTS.contains(&client.as_str()) {
+                if let Some(roles) = client_val.get("roles").and_then(|v| v.as_array()) {
+                    for r in roles {
+                        if let Some(s) = r.as_str() {
+                            permissions.push(s.to_string());
+                        }
                     }
                 }
             }
         }
     }
-    // 3. scope
-    if let Some(scope_str) = val.get("scope").and_then(|v| v.as_str()) {
+    if let Some(scope_str) = claims.get("scope").and_then(|v| v.as_str()) {
         for s in scope_str.split_whitespace() {
             permissions.push(format!("scope:{}", s));
         }
     }
-
-    if permissions.is_empty() {
-        permissions.push("agent:profile:read".to_string());
-        permissions.push("agent:dashboard:read".to_string());
-    }
-
     permissions.sort();
     permissions.dedup();
     permissions
 }
 
 /// Helper to authoritatively resolve permitted workspaces for the principal
-pub async fn resolve_permitted_workspaces(
+/// Outcome of authoritative workspace resolution.
+#[derive(Debug)]
+pub enum WorkspaceResolution {
+    /// User has agency membership; workspaces proven via Agency Service.
+    Member(Vec<WorkspaceDto>),
+    /// User legitimately has no agency membership (candidate/onboarding).
+    Candidate,
+}
+
+impl WorkspaceResolution {
+    pub fn workspaces(&self) -> Vec<WorkspaceDto> {
+        match self {
+            Self::Member(w) => w.clone(),
+            Self::Candidate => vec![WorkspaceDto {
+                id: "workspace-candidate".to_string(),
+                name: "Candidate / Onboarding Workspace".to_string(),
+                agency_code: None,
+                role: "CANDIDATE".to_string(),
+                is_default: true,
+            }],
+        }
+    }
+}
+
+/// Authoritatively resolve permitted workspaces. Fails closed when the
+/// Agency Service cannot prove membership — a service outage is never
+/// silently downgraded to a candidate workspace.
+pub async fn resolve_workspace_resolution(
     state: &AppState,
     principal: &AuthenticatedPrincipal,
-) -> Vec<WorkspaceDto> {
+) -> Result<WorkspaceResolution, FeErrorResponse> {
     let mut workspaces = Vec::new();
 
-    if let (Some(agency_client), Some(aid)) = (&state.agency_client, principal.agent_id) {
+    let Some(agency_client) = &state.agency_client else {
+        // No authoritative membership source: only non-agent (candidate)
+        // principals may proceed, and only to the candidate workspace.
+        if principal.agent_id.is_none() {
+            return Ok(WorkspaceResolution::Candidate);
+        }
+        return Err(FeErrorResponse::new(
+            CanonicalErrorCode::DependencyUnavailable,
+            "Agency service is not configured; cannot authoritatively verify workspace entitlement",
+            principal.request_id,
+            principal.correlation_id,
+        ));
+    };
+    let Some(aid) = principal.agent_id else {
+        return Ok(WorkspaceResolution::Candidate);
+    };
+    {
         match agency_client
             .get_current_assignment(aid, &principal.access_token, principal.request_id)
             .await
@@ -198,28 +226,24 @@ pub async fn resolve_permitted_workspaces(
             }
             Ok(None) => {
                 tracing::debug!(agent_id = %aid, "Agent has no active agency assignment; candidate workspace granted");
+                return Ok(WorkspaceResolution::Candidate);
             }
             Err(e) => {
-                tracing::warn!(error = %e, agent_id = %aid, "Failed to query agency assignment");
+                tracing::warn!(error = %e, agent_id = %aid, "Agency assignment query failed");
+                return Err(FeErrorResponse::new(
+                    CanonicalErrorCode::DependencyUnavailable,
+                    "Agency service unavailable; cannot verify workspace entitlement",
+                    principal.request_id,
+                    principal.correlation_id,
+                ));
             }
         }
     }
 
     if workspaces.is_empty() {
-        let default_id = principal
-            .workspace_id
-            .clone()
-            .unwrap_or_else(|| "workspace-candidate".to_string());
-        workspaces.push(WorkspaceDto {
-            id: default_id,
-            name: "Default Agent Workspace".to_string(),
-            agency_code: None,
-            role: "AGENT".to_string(),
-            is_default: true,
-        });
+        return Ok(WorkspaceResolution::Candidate);
     }
-
-    workspaces
+    Ok(WorkspaceResolution::Member(workspaces))
 }
 
 /// GET /api/v1/me — IDENTITY-01
@@ -253,14 +277,21 @@ pub async fn get_me(
         }
     }
 
-    let permitted = resolve_permitted_workspaces(&state, &principal).await;
+    let permitted = match resolve_workspace_resolution(&state, &principal).await {
+        Ok(r) => r.workspaces(),
+        Err(_) => {
+            partial = true;
+            unavailable_sections.push("workspaces".to_string());
+            Vec::new()
+        }
+    };
     let active_workspace = principal
         .workspace_id
         .clone()
         .filter(|id| permitted.iter().any(|w| &w.id == id))
         .or_else(|| permitted.first().map(|w| w.id.clone()));
 
-    let permissions = extract_permissions_from_jwt(&principal.access_token);
+    let permissions = verified_permissions(&state, &principal.access_token).await;
 
     let profile = UserProfileDto {
         subject: principal.subject,
@@ -289,7 +320,8 @@ pub async fn get_workspaces(
     State(state): State<AppState>,
     principal: AuthenticatedPrincipal,
 ) -> Result<FeResponse<WorkspaceListResponse>, FeErrorResponse> {
-    let permitted = resolve_permitted_workspaces(&state, &principal).await;
+    let resolution = resolve_workspace_resolution(&state, &principal).await?;
+    let permitted = resolution.workspaces();
     let active = principal
         .workspace_id
         .clone()
@@ -320,8 +352,18 @@ pub async fn select_workspace(
         ));
     }
 
-    let permitted = resolve_permitted_workspaces(&state, &principal).await;
-    if state.agency_client.is_some() && !permitted.iter().any(|w| w.id == payload.workspace_id) {
+    if state.agency_client.is_none() {
+        return Err(FeErrorResponse::new(
+            CanonicalErrorCode::DependencyUnavailable,
+            "Agency service is not configured; cannot authoritatively verify workspace entitlement",
+            principal.request_id,
+            principal.correlation_id,
+        ));
+    }
+
+    let resolution = resolve_workspace_resolution(&state, &principal).await?;
+    let permitted = resolution.workspaces();
+    if !permitted.iter().any(|w| w.id == payload.workspace_id) {
         return Err(FeErrorResponse::forbidden(
             format!(
                 "User is not authorized for workspace '{}'",
@@ -332,13 +374,43 @@ pub async fn select_workspace(
         ));
     }
 
-    // Update workspace in active session
-    if let Ok(auth) = state.auth() {
-        if let Some(mut session) = auth.store.get_session(&principal.session_id).await {
-            session.workspace_id = Some(payload.workspace_id.clone());
-            let _ = auth.store.update_session(&session).await;
-        }
+    // Update workspace in active session — fail closed if persistence cannot be confirmed
+    let auth = state.auth().map_err(|_| {
+        FeErrorResponse::new(
+            CanonicalErrorCode::DependencyUnavailable,
+            "Authentication subsystem unavailable",
+            principal.request_id,
+            principal.correlation_id,
+        )
+    })?;
+
+    // Confirm the session still exists before mutating workspace context.
+    if auth
+        .store
+        .get_session(&principal.session_id)
+        .await
+        .is_none()
+    {
+        return Err(FeErrorResponse::unauthenticated(
+            "Session not found or expired. Please sign in again.",
+            principal.request_id,
+            principal.correlation_id,
+        ));
     }
+
+    // Atomic single-column update — cannot clobber concurrent token refresh
+    // or activity updates, and fails closed on persistence errors.
+    auth.store
+        .persist_workspace(&principal.session_id, Some(&payload.workspace_id))
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to persist workspace update in session store");
+            FeErrorResponse::internal(
+                "Failed to persist workspace update to session store",
+                principal.request_id,
+                principal.correlation_id,
+            )
+        })?;
 
     Ok(FeResponse::ok(
         serde_json::json!({

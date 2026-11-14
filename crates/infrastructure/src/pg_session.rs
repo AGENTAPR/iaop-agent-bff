@@ -155,18 +155,12 @@ impl SessionStore for PgSessionStore {
     }
 
     async fn update_session(&self, s: &Session) -> Result<(), String> {
-        let sql = r#"
-            UPDATE bff_sessions
-            SET last_seen_at = now(),
-                workspace_id = $2,
-                agent_id     = $3
-            WHERE id = $1
-        "#;
+        // Activity touch only — never rewrites workspace/token columns, so a
+        // concurrent workspace switch or token refresh cannot be clobbered.
+        let sql = "UPDATE bff_sessions SET last_seen_at = now() WHERE id = $1";
 
         sqlx::query(sql)
             .bind(&s.id)
-            .bind(&s.workspace_id)
-            .bind(s.agent_id)
             .execute(&self.pool)
             .await
             .map_err(|e| {
@@ -174,6 +168,35 @@ impl SessionStore for PgSessionStore {
                 "session store error".to_string()
             })?;
 
+        Ok(())
+    }
+
+    async fn persist_workspace(
+        &self,
+        session_id: &str,
+        workspace_id: Option<&str>,
+    ) -> Result<(), String> {
+        let sql = r#"
+            UPDATE bff_sessions
+            SET workspace_id = $2, last_seen_at = now()
+            WHERE id = $1
+              AND last_seen_at + (idle_timeout_secs || ' seconds')::interval > now()
+              AND created_at   + (absolute_timeout_secs || ' seconds')::interval > now()
+        "#;
+
+        let res = sqlx::query(sql)
+            .bind(session_id)
+            .bind(workspace_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "pg_session: persist_workspace failed");
+                "session store error".to_string()
+            })?;
+
+        if res.rows_affected() == 0 {
+            return Err("session not found or expired".to_string());
+        }
         Ok(())
     }
 

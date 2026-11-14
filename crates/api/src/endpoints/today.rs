@@ -304,29 +304,42 @@ pub async fn get_today(
         })
     };
 
-    let priority_tasks = if state.config.workflow_service_url.is_none() {
-        partial = true;
-        unavailable.push("tasks".to_string());
-        SectionResult::unavailable("Workflow task service unconfigured")
-    } else {
-        SectionResult::available(Vec::new())
+    // Authoritative tasks, agenda, and activity sections:
+    // When downstream client queries are unexecuted/pending, truthfully report UNAVAILABLE.
+    let priority_tasks = match &state.config.workflow_service_url {
+        Some(_) => {
+            unavailable.push("tasks".to_string());
+            SectionResult::unavailable("Workflow task client integration pending")
+        }
+        None => {
+            unavailable.push("tasks".to_string());
+            SectionResult::unavailable("Workflow task service unconfigured")
+        }
     };
 
-    let agenda = if state.config.workflow_service_url.is_none() {
-        partial = true;
-        unavailable.push("agenda".to_string());
-        SectionResult::unavailable("Calendar and agenda service unconfigured")
-    } else {
-        SectionResult::available(Vec::new())
+    let agenda = match &state.config.workflow_service_url {
+        Some(_) => {
+            unavailable.push("agenda".to_string());
+            SectionResult::unavailable("Calendar and agenda client integration pending")
+        }
+        None => {
+            unavailable.push("agenda".to_string());
+            SectionResult::unavailable("Calendar and agenda service unconfigured")
+        }
     };
 
-    let recent_activity = if state.config.notification_service_url.is_none() {
-        partial = true;
-        unavailable.push("recent_activity".to_string());
-        SectionResult::unavailable("Notification and activity service unconfigured")
-    } else {
-        SectionResult::available(Vec::new())
+    let recent_activity = match &state.config.notification_service_url {
+        Some(_) => {
+            unavailable.push("recent_activity".to_string());
+            SectionResult::unavailable("Notification and activity client integration pending")
+        }
+        None => {
+            unavailable.push("recent_activity".to_string());
+            SectionResult::unavailable("Notification and activity service unconfigured")
+        }
     };
+
+    let partial = partial || !unavailable.is_empty();
 
     let dashboard = TodayDashboardDto {
         lifecycle_context: lifecycle_status,

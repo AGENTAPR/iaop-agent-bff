@@ -174,27 +174,45 @@ pub async fn get_my_team(
     let team: Vec<TeamMemberDto> = match assignment {
         Some(a) => {
             // Query actual team members (all agents currently assigned to this unit)
-            match agency_client
+            let other_members: Vec<_> = match agency_client
                 .get_unit_assignments(a.unit_id, &principal.access_token, principal.request_id)
                 .await
             {
                 Ok(members) => members
                     .into_iter()
                     .filter(|m| m.agent_id != agent_id)
-                    .map(|m| TeamMemberDto {
-                        agent_id: m.agent_id,
-                        agent_code: format!("AG-{}", m.agent_id.to_string()[..8].to_uppercase()),
-                        full_name: format!("Agent {}", &m.agent_id.to_string()[..8]),
-                        role: m.assignment_type,
-                        lifecycle_status: m.status,
-                        active_proposals_count: 0,
-                    })
                     .collect(),
                 Err(e) => {
                     tracing::warn!(error = %e, unit_id = %a.unit_id, "Failed to fetch unit assignments for team");
                     Vec::new()
                 }
+            };
+
+            // Enrich member details authoritatively from Agent Service when configured
+            let mut enriched_team = Vec::with_capacity(other_members.len());
+            for m in other_members {
+                let (code, status) = if let Some(agent_client) = &state.agent_client {
+                    match agent_client
+                        .get_agent(m.agent_id, &principal.access_token, principal.request_id)
+                        .await
+                    {
+                        Ok(agent) => (agent.agent_code, agent.lifecycle_status),
+                        Err(_) => (m.agent_id.to_string()[..8].to_uppercase(), m.status),
+                    }
+                } else {
+                    (m.agent_id.to_string()[..8].to_uppercase(), m.status)
+                };
+
+                enriched_team.push(TeamMemberDto {
+                    agent_id: m.agent_id,
+                    agent_code: code.clone(),
+                    full_name: format!("Agent {}", code),
+                    role: m.assignment_type,
+                    lifecycle_status: status,
+                    active_proposals_count: 0,
+                });
             }
+            enriched_team
         }
         None => Vec::new(),
     };

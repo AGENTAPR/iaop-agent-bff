@@ -37,7 +37,7 @@ axum = "0.8"
 tower = "0.5"
 utoipa = { version = "5", features = ["uuid", "chrono"] }
 anyhow = "1"
-iaop-security = { git = "https://github.com/AGENTAPR/iaop-rust-common", branch = "main" }
+iaop-security = { git = "https://github.com/AGENTAPR/iaop-rust-common", branch = "development" }
 sha2 = "0.10"
 rand = "0.8"
 base64 = "0.22"

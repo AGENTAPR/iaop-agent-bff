@@ -105,8 +105,20 @@ fn build_auth_context(
         redirect_uri,
         allowed_return_paths: config.oidc_allowed_return_paths.clone(),
     };
-    let id_validator =
-        JwtValidator::new(RemoteJwksProvider::new(oidc.jwks_uri()), issuer, client_id);
+    let id_validator = JwtValidator::new(
+        RemoteJwksProvider::new(oidc.jwks_uri()),
+        issuer.clone(),
+        client_id,
+    );
+    // Access tokens carry domain API audiences; validate against the agent API
+    // audience which the BFF session token must contain for domain calls.
+    let access_audience =
+        std::env::var("ACCESS_TOKEN_AUDIENCE").unwrap_or_else(|_| "iaop-agent-api".to_string());
+    let access_validator = JwtValidator::new(
+        RemoteJwksProvider::new(oidc.jwks_uri()),
+        issuer,
+        access_audience,
+    );
 
     let store: Arc<dyn iaop_agent_bff_infrastructure::session::SessionStore> = match db {
         Some(pool) => {
@@ -129,6 +141,7 @@ fn build_auth_context(
         oidc,
         store,
         id_validator,
+        access_validator,
     }))
 }
 

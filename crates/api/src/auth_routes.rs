@@ -33,6 +33,8 @@ pub struct AuthContext {
     pub store: Arc<dyn SessionStore>,
     /// Validates ID tokens (audience = BFF client_id).
     pub id_validator: JwtValidator<RemoteJwksProvider>,
+    /// Validates access tokens forwarded to domain APIs (audience = domain API).
+    pub access_validator: JwtValidator<RemoteJwksProvider>,
 }
 
 impl AppState {
@@ -215,14 +217,63 @@ pub async fn callback(
             .await
         {
             Ok(Some(link)) => {
-                tracing::info!(subject = %claims.sub, agent_id = %link.agent_id, "resolved active agent identity link");
-                agent_id = Some(link.agent_id);
+                if link.status.eq_ignore_ascii_case("ACTIVE") && link.unlinked_at.is_none() {
+                    tracing::info!(
+                        subject = %claims.sub,
+                        agent_id = %link.agent_id,
+                        status = "LINKED_ACTIVE",
+                        "authoritatively resolved active agent identity link"
+                    );
+                    agent_id = Some(link.agent_id);
+                } else {
+                    tracing::warn!(
+                        subject = %claims.sub,
+                        agent_id = %link.agent_id,
+                        status = "LINK_REVOKED",
+                        "identity link exists but is revoked or inactive; restricting agent privileges"
+                    );
+                }
             }
             Ok(None) => {
-                tracing::info!(subject = %claims.sub, "user has no linked agent (candidate/unlinked state)");
+                tracing::info!(
+                    subject = %claims.sub,
+                    status = "NOT_LINKED",
+                    "user has no linked agent (candidate or non-agent onboarding state)"
+                );
+            }
+            Err(iaop_agent_bff_infrastructure::clients::AgentClientError::Upstream {
+                status: 409,
+                message,
+            }) => {
+                tracing::error!(
+                    subject = %claims.sub,
+                    status = "LINK_CONFLICT",
+                    message = %message,
+                    "conflicting agent identity link mapping detected"
+                );
+                return err(
+                    StatusCode::CONFLICT,
+                    "Conflicting agent identity link detected",
+                );
+            }
+            Err(iaop_agent_bff_infrastructure::clients::AgentClientError::Upstream {
+                status: 401 | 403,
+                message,
+            }) => {
+                tracing::warn!(
+                    subject = %claims.sub,
+                    status = "UNAUTHORIZED_RESOLUTION",
+                    message = %message,
+                    "unauthorized to resolve identity link"
+                );
             }
             Err(e) => {
-                tracing::warn!(error = %e, subject = %claims.sub, "identity resolution query failed; proceeding without agent link");
+                tracing::warn!(
+                    error = %e,
+                    subject = %claims.sub,
+                    status = "IDENTITY_SERVICE_UNAVAILABLE",
+                    "identity resolution query failed; proceeding in restricted candidate mode"
+                );
             }
         }
     }

@@ -200,6 +200,34 @@ async fn mutating_request_with_valid_csrf_succeeds() {
     let app = build_router(state);
 
     let body = serde_json::json!({
+        "theme": "dark"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/v1/me/preferences")
+                .header(header::COOKIE, format!("iaop_session={}", session_id))
+                .header("x-csrf-token", csrf_token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response).await;
+    assert_eq!(json["data"]["theme"], "dark");
+}
+
+#[tokio::test]
+async fn workspace_selection_unconfigured_agency_client_returns_503() {
+    let (state, session_id, csrf_token) = test_auth_state().await;
+    let app = build_router(state);
+
+    let body = serde_json::json!({
         "workspaceId": "ws-jakarta-selatan"
     });
 
@@ -217,9 +245,9 @@ async fn mutating_request_with_valid_csrf_succeeds() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let json = response_json(response).await;
-    assert_eq!(json["data"]["selectedWorkspaceId"], "ws-jakarta-selatan");
+    assert_eq!(json["error"]["code"], "DEPENDENCY_UNAVAILABLE");
 }
 
 #[tokio::test]
