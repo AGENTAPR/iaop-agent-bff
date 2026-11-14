@@ -125,6 +125,8 @@ pub struct TokenResponse {
     pub expires_in: Option<u64>,
     #[serde(default)]
     pub refresh_token: Option<String>,
+    /// Present on code exchange; refresh grants may omit it.
+    #[serde(default)]
     pub id_token: String,
 }
 

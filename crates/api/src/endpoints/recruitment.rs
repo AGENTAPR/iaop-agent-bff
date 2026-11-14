@@ -45,10 +45,18 @@ pub struct ReferralSummaryDto {
     pub recent_candidates: Vec<CandidateDto>,
 }
 
-fn recruitment_unavailable(principal: &AuthenticatedPrincipal) -> FeErrorResponse {
+fn recruitment_unavailable(
+    principal: &AuthenticatedPrincipal,
+    configured: bool,
+) -> FeErrorResponse {
+    let msg = if configured {
+        "Recruitment service is configured but downstream candidate lifecycle endpoints are not yet available in iaop-recruitment-service"
+    } else {
+        "Recruitment service is not configured (RECRUITMENT_SERVICE_URL unset). Downstream iaop-recruitment-service required."
+    };
     FeErrorResponse::new(
         CanonicalErrorCode::DependencyUnavailable,
-        "Recruitment service is not configured. Downstream iaop-recruitment-service required.",
+        msg,
         principal.request_id,
         principal.correlation_id,
     )
@@ -59,11 +67,8 @@ pub async fn list_candidates(
     State(state): State<AppState>,
     principal: AuthenticatedPrincipal,
 ) -> Result<FeResponse<Vec<CandidateDto>>, FeErrorResponse> {
-    if state.config.recruitment_service_url.is_none() {
-        return Err(recruitment_unavailable(&principal));
-    }
-    // Recruitment service integration not yet implemented.
-    Err(recruitment_unavailable(&principal))
+    let configured = state.config.recruitment_service_url.is_some();
+    Err(recruitment_unavailable(&principal, configured))
 }
 
 /// POST /api/v1/recruitment/candidates — RECRUITMENT-02
@@ -84,13 +89,8 @@ pub async fn create_candidate(
         ));
     }
 
-    if state.config.recruitment_service_url.is_none() {
-        return Err(recruitment_unavailable(&principal));
-    }
-
-    // Recruitment service integration not yet implemented.
-    // Will delegate to recruitment-service POST /api/v1/candidates when available.
-    Err(recruitment_unavailable(&principal))
+    let configured = state.config.recruitment_service_url.is_some();
+    Err(recruitment_unavailable(&principal, configured))
 }
 
 /// GET /api/v1/recruitment/candidates/{candidateId} — RECRUITMENT-03
@@ -99,10 +99,8 @@ pub async fn get_candidate(
     principal: AuthenticatedPrincipal,
     Path(_candidate_id): Path<Uuid>,
 ) -> Result<FeResponse<CandidateDto>, FeErrorResponse> {
-    if state.config.recruitment_service_url.is_none() {
-        return Err(recruitment_unavailable(&principal));
-    }
-    Err(recruitment_unavailable(&principal))
+    let configured = state.config.recruitment_service_url.is_some();
+    Err(recruitment_unavailable(&principal, configured))
 }
 
 /// GET /api/v1/recruitment/my-referrals — RECRUITMENT-04
@@ -110,8 +108,6 @@ pub async fn get_my_referrals(
     State(state): State<AppState>,
     principal: AuthenticatedPrincipal,
 ) -> Result<FeResponse<ReferralSummaryDto>, FeErrorResponse> {
-    if state.config.recruitment_service_url.is_none() {
-        return Err(recruitment_unavailable(&principal));
-    }
-    Err(recruitment_unavailable(&principal))
+    let configured = state.config.recruitment_service_url.is_some();
+    Err(recruitment_unavailable(&principal, configured))
 }

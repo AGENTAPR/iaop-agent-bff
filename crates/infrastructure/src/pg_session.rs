@@ -31,17 +31,24 @@ impl PgSessionStore {
 #[async_trait::async_trait]
 impl SessionStore for PgSessionStore {
     async fn create_session(&self, s: Session) -> Result<(), String> {
-        let access_token = match &self.cipher {
-            Some(c) => c
-                .encrypt(&s.access_token)
-                .map_err(|e| format!("cipher error: {e}"))?,
-            None => s.access_token.clone(),
-        };
+        // Fail closed: persistent OAuth tokens must never be stored in
+        // plaintext. A missing cipher is a configuration error, not a
+        // reason to degrade silently.
+        let cipher = self
+            .cipher
+            .as_ref()
+            .ok_or_else(|| "session token encryption is not configured".to_string())?;
+        let access_token = cipher
+            .encrypt(&s.access_token)
+            .map_err(|e| format!("cipher error: {e}"))?;
 
-        let refresh_token = match (&self.cipher, &s.refresh_token) {
-            (Some(c), Some(rt)) => Some(c.encrypt(rt).map_err(|e| format!("cipher error: {e}"))?),
-            (None, Some(rt)) => Some(rt.clone()),
-            _ => None,
+        let refresh_token = match &s.refresh_token {
+            Some(rt) => Some(
+                cipher
+                    .encrypt(rt)
+                    .map_err(|e| format!("cipher error: {e}"))?,
+            ),
+            None => None,
         };
 
         let sql = r#"
@@ -112,29 +119,26 @@ impl SessionStore for PgSessionStore {
             .to_std()
             .unwrap_or(Duration::ZERO);
 
+        let cipher = self.cipher.as_ref()?;
         let raw_access: String = row.try_get("access_token").ok()?;
-        let access_token = match &self.cipher {
-            Some(c) => match c.decrypt(&raw_access) {
-                Ok(t) => t,
-                Err(e) => {
-                    tracing::error!(error = %e, "pg_session: failed to decrypt access_token; rejecting compromised session");
-                    return None;
-                }
-            },
-            None => raw_access,
+        let access_token = match cipher.decrypt(&raw_access) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!(error = %e, "pg_session: failed to decrypt access_token; rejecting compromised session");
+                return None;
+            }
         };
 
         let raw_refresh: Option<String> = row.try_get("refresh_token").ok()?;
-        let refresh_token = match (&self.cipher, raw_refresh) {
-            (Some(c), Some(r)) => match c.decrypt(&r) {
+        let refresh_token = match raw_refresh {
+            Some(r) => match cipher.decrypt(&r) {
                 Ok(t) => Some(t),
                 Err(e) => {
                     tracing::error!(error = %e, "pg_session: failed to decrypt refresh_token; rejecting compromised session");
                     return None;
                 }
             },
-            (None, Some(r)) => Some(r),
-            _ => None,
+            None => None,
         };
 
         Some(Session {
@@ -155,18 +159,12 @@ impl SessionStore for PgSessionStore {
     }
 
     async fn update_session(&self, s: &Session) -> Result<(), String> {
-        let sql = r#"
-            UPDATE bff_sessions
-            SET last_seen_at = now(),
-                workspace_id = $2,
-                agent_id     = $3
-            WHERE id = $1
-        "#;
+        // Activity touch only — never rewrites workspace/token columns, so a
+        // concurrent workspace switch or token refresh cannot be clobbered.
+        let sql = "UPDATE bff_sessions SET last_seen_at = now() WHERE id = $1";
 
         sqlx::query(sql)
             .bind(&s.id)
-            .bind(&s.workspace_id)
-            .bind(s.agent_id)
             .execute(&self.pool)
             .await
             .map_err(|e| {
@@ -174,6 +172,87 @@ impl SessionStore for PgSessionStore {
                 "session store error".to_string()
             })?;
 
+        Ok(())
+    }
+
+    async fn persist_workspace(
+        &self,
+        session_id: &str,
+        workspace_id: Option<&str>,
+    ) -> Result<(), String> {
+        let sql = r#"
+            UPDATE bff_sessions
+            SET workspace_id = $2, last_seen_at = now()
+            WHERE id = $1
+              AND last_seen_at + (idle_timeout_secs || ' seconds')::interval > now()
+              AND created_at   + (absolute_timeout_secs || ' seconds')::interval > now()
+        "#;
+
+        let res = sqlx::query(sql)
+            .bind(session_id)
+            .bind(workspace_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "pg_session: persist_workspace failed");
+                "session store error".to_string()
+            })?;
+
+        if res.rows_affected() == 0 {
+            return Err("session not found or expired".to_string());
+        }
+        Ok(())
+    }
+
+    async fn update_tokens(
+        &self,
+        session_id: &str,
+        access_token: &str,
+        refresh_token: Option<&str>,
+        access_expires_at: DateTime<Utc>,
+    ) -> Result<(), String> {
+        let cipher = self
+            .cipher
+            .as_ref()
+            .ok_or_else(|| "session token encryption is not configured".to_string())?;
+        let enc_access = cipher
+            .encrypt(access_token)
+            .map_err(|e| format!("cipher error: {e}"))?;
+        let enc_refresh = match refresh_token {
+            Some(rt) => Some(
+                cipher
+                    .encrypt(rt)
+                    .map_err(|e| format!("cipher error: {e}"))?,
+            ),
+            None => None,
+        };
+
+        let sql = r#"
+            UPDATE bff_sessions
+            SET access_token = $2,
+                refresh_token = COALESCE($3, refresh_token),
+                access_expires_at = $4,
+                last_seen_at = now()
+            WHERE id = $1
+              AND last_seen_at + (idle_timeout_secs || ' seconds')::interval > now()
+              AND created_at   + (absolute_timeout_secs || ' seconds')::interval > now()
+        "#;
+
+        let res = sqlx::query(sql)
+            .bind(session_id)
+            .bind(&enc_access)
+            .bind(&enc_refresh)
+            .bind(access_expires_at)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "pg_session: update_tokens failed");
+                "session store error".to_string()
+            })?;
+
+        if res.rows_affected() == 0 {
+            return Err("session not found or expired".to_string());
+        }
         Ok(())
     }
 

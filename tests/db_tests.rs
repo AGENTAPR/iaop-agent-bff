@@ -78,13 +78,15 @@ async fn encrypted_session_persistence_and_fail_closed_on_tampering() {
     assert_eq!(retrieved.refresh_token.as_deref(), Some(plain_refresh));
     assert_eq!(retrieved.subject, "user-sub-123");
 
-    // 4. Update session
-    let mut updated = retrieved;
-    updated.workspace_id = Some("ws-02".to_string());
+    // 4. Update session workspace atomically via persist_workspace
     store
-        .update_session(&updated)
+        .persist_workspace(&sid, Some("ws-02"))
         .await
-        .expect("update succeeds");
+        .expect("persist_workspace succeeds");
+    store
+        .update_session(&retrieved)
+        .await
+        .expect("update_session activity touch succeeds");
 
     let updated_ws: Option<String> =
         sqlx::query_scalar("SELECT workspace_id FROM bff_sessions WHERE id = $1")

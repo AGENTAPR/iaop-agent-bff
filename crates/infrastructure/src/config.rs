@@ -82,17 +82,19 @@ impl AppConfig {
             .ok()
             .filter(|v| !v.is_empty());
 
-        if is_production {
-            if database_url.is_none() {
-                return Err(ConfigError::UnsafeConfig(
-                    "DATABASE_URL must be configured when ENVIRONMENT=production".into(),
-                ));
-            }
-            if sessions_encryption_key.is_none() {
-                return Err(ConfigError::UnsafeConfig(
-                    "SESSIONS_ENCRYPTION_KEY must be configured when ENVIRONMENT=production".into(),
-                ));
-            }
+        // Persistent session storage (PostgreSQL) must never fall back to
+        // plaintext OAuth tokens — encryption key is mandatory whenever a
+        // database is configured, in every environment.
+        if database_url.is_some() && sessions_encryption_key.is_none() {
+            return Err(ConfigError::UnsafeConfig(
+                "SESSIONS_ENCRYPTION_KEY must be configured when DATABASE_URL is set (persistent sessions require encrypted token storage)".into(),
+            ));
+        }
+
+        if is_production && database_url.is_none() {
+            return Err(ConfigError::UnsafeConfig(
+                "DATABASE_URL must be configured when ENVIRONMENT=production".into(),
+            ));
         }
 
         Ok(Self {

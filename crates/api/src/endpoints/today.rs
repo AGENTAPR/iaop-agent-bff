@@ -107,8 +107,10 @@ pub struct TodayDashboardDto {
     pub priority_tasks: SectionResult<Vec<TaskItemDto>>,
     pub agenda: SectionResult<Vec<AgendaItemDto>>,
     pub recent_activity: SectionResult<Vec<ActivityItemDto>>,
-    pub customer_attention_count: u32,
-    pub open_claims_count: u32,
+    /// Authoritative count; `None` when no customer/claims read model is wired.
+    pub customer_attention_count: Option<u32>,
+    /// Authoritative count; `None` when no claims read model is wired.
+    pub open_claims_count: Option<u32>,
     pub as_of: DateTime<Utc>,
     pub partial: bool,
     pub unavailable_sections: Vec<String>,
@@ -304,29 +306,42 @@ pub async fn get_today(
         })
     };
 
-    let priority_tasks = if state.config.workflow_service_url.is_none() {
-        partial = true;
-        unavailable.push("tasks".to_string());
-        SectionResult::unavailable("Workflow task service unconfigured")
-    } else {
-        SectionResult::available(Vec::new())
+    // Authoritative tasks, agenda, and activity sections:
+    // When downstream client queries are unexecuted/pending, truthfully report UNAVAILABLE.
+    let priority_tasks = match &state.config.workflow_service_url {
+        Some(_) => {
+            unavailable.push("tasks".to_string());
+            SectionResult::unavailable("Workflow task client integration pending")
+        }
+        None => {
+            unavailable.push("tasks".to_string());
+            SectionResult::unavailable("Workflow task service unconfigured")
+        }
     };
 
-    let agenda = if state.config.workflow_service_url.is_none() {
-        partial = true;
-        unavailable.push("agenda".to_string());
-        SectionResult::unavailable("Calendar and agenda service unconfigured")
-    } else {
-        SectionResult::available(Vec::new())
+    let agenda = match &state.config.workflow_service_url {
+        Some(_) => {
+            unavailable.push("agenda".to_string());
+            SectionResult::unavailable("Calendar and agenda client integration pending")
+        }
+        None => {
+            unavailable.push("agenda".to_string());
+            SectionResult::unavailable("Calendar and agenda service unconfigured")
+        }
     };
 
-    let recent_activity = if state.config.notification_service_url.is_none() {
-        partial = true;
-        unavailable.push("recent_activity".to_string());
-        SectionResult::unavailable("Notification and activity service unconfigured")
-    } else {
-        SectionResult::available(Vec::new())
+    let recent_activity = match &state.config.notification_service_url {
+        Some(_) => {
+            unavailable.push("recent_activity".to_string());
+            SectionResult::unavailable("Notification and activity client integration pending")
+        }
+        None => {
+            unavailable.push("recent_activity".to_string());
+            SectionResult::unavailable("Notification and activity service unconfigured")
+        }
     };
+
+    let partial = partial || !unavailable.is_empty();
 
     let dashboard = TodayDashboardDto {
         lifecycle_context: lifecycle_status,
@@ -339,8 +354,8 @@ pub async fn get_today(
         priority_tasks,
         agenda,
         recent_activity,
-        customer_attention_count: 0,
-        open_claims_count: 0,
+        customer_attention_count: None,
+        open_claims_count: None,
         as_of: Utc::now(),
         partial,
         unavailable_sections: unavailable,

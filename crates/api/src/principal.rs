@@ -3,12 +3,18 @@
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::http::{Method, StatusCode, header};
+use chrono::Utc;
 use uuid::Uuid;
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::auth_routes::SESSION_COOKIE;
 use crate::envelope::FeErrorResponse;
 use crate::middleware::{CORRELATION_ID_HEADER, REQUEST_ID_HEADER};
 use crate::state::AppState;
+use iaop_agent_bff_infrastructure::oidc;
+use iaop_agent_bff_infrastructure::session::Session;
 
 /// Fallback cookie name for non-HTTPS development environments.
 const DEV_SESSION_COOKIE: &str = "iaop_session";
@@ -56,6 +62,115 @@ fn extract_ids(parts: &Parts) -> (Option<Uuid>, Option<Uuid>) {
     (req_id, corr_id)
 }
 
+/// Refresh access tokens this many seconds before expiry.
+const REFRESH_SKEW: chrono::Duration = chrono::Duration::seconds(60);
+
+/// Per-session async locks so concurrent requests don't race refresh-token
+/// rotation. Process-local; multi-replica deployments need a shared lock
+/// (documented limitation — refresh rotation is still atomic at the store).
+fn session_refresh_lock(session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    let map = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut g = map.lock().unwrap_or_else(|e| e.into_inner());
+    g.entry(session_id.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+/// Ensures the session carries an unexpired access token, refreshing via the
+/// OIDC token endpoint when needed. Fails closed: revoked/expired refresh
+/// tokens invalidate the session; transient IdP outages return 503 without
+/// destroying the session.
+async fn ensure_fresh_session(
+    auth: &crate::auth_routes::AuthContext,
+    mut session: Session,
+    req_id: Option<uuid::Uuid>,
+    corr_id: Option<uuid::Uuid>,
+) -> Result<Session, FeErrorResponse> {
+    if session.access_expires_at > Utc::now() + REFRESH_SKEW {
+        return Ok(session);
+    }
+    if session.refresh_token.is_none() {
+        return Err(FeErrorResponse::unauthenticated(
+            "Session expired. Please sign in again.",
+            req_id,
+            corr_id,
+        ));
+    }
+
+    // Singleflight per session: concurrent requests wait, then re-check.
+    let lock = session_refresh_lock(&session.id);
+    let _guard = lock.lock().await;
+
+    // Re-read: another request may have already refreshed.
+    if let Some(fresh) = auth.store.get_session(&session.id).await {
+        if fresh.access_expires_at > Utc::now() + REFRESH_SKEW {
+            return Ok(fresh);
+        }
+        session = fresh;
+    } else {
+        return Err(FeErrorResponse::unauthenticated(
+            "Session expired or invalid. Please sign in again.",
+            req_id,
+            corr_id,
+        ));
+    }
+    let Some(rt) = session.refresh_token.clone() else {
+        return Err(FeErrorResponse::unauthenticated(
+            "Session expired. Please sign in again.",
+            req_id,
+            corr_id,
+        ));
+    };
+
+    match oidc::refresh_tokens(&auth.oidc, &rt).await {
+        Ok(tokens) => {
+            let expires_at =
+                Utc::now() + chrono::Duration::seconds(tokens.expires_in.unwrap_or(300) as i64);
+            let new_refresh = tokens.refresh_token.clone();
+            auth.store
+                .update_tokens(
+                    &session.id,
+                    &tokens.access_token,
+                    new_refresh.as_deref(),
+                    expires_at,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, "failed to persist refreshed tokens");
+                    FeErrorResponse::internal(
+                        "Failed to persist session token refresh",
+                        req_id,
+                        corr_id,
+                    )
+                })?;
+            session.access_token = tokens.access_token;
+            if let Some(nr) = new_refresh {
+                session.refresh_token = Some(nr);
+            }
+            session.access_expires_at = expires_at;
+            Ok(session)
+        }
+        Err(oidc::OidcError::TokenEndpoint) => {
+            // Refresh token rejected (revoked/expired) — invalidate session.
+            auth.store.delete_session(&session.id).await;
+            Err(FeErrorResponse::unauthenticated(
+                "Session expired. Please sign in again.",
+                req_id,
+                corr_id,
+            ))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "token refresh transport failure");
+            Err(FeErrorResponse::dependency_unavailable(
+                "Identity provider temporarily unavailable",
+                req_id,
+                corr_id,
+            ))
+        }
+    }
+}
+
 impl FromRequestParts<AppState> for AuthenticatedPrincipal {
     type Rejection = FeErrorResponse;
 
@@ -87,7 +202,7 @@ impl FromRequestParts<AppState> for AuthenticatedPrincipal {
             }
         };
 
-        let mut session = match auth.store.get_session(&sid).await {
+        let session = match auth.store.get_session(&sid).await {
             Some(s) => s,
             None => {
                 return Err(FeErrorResponse::unauthenticated(
@@ -97,6 +212,7 @@ impl FromRequestParts<AppState> for AuthenticatedPrincipal {
                 ));
             }
         };
+        let mut session = ensure_fresh_session(auth, session, req_id, corr_id).await?;
 
         // CSRF verification for mutating requests
         let method = &parts.method;
