@@ -6,10 +6,10 @@ Date: 2026-11-15 · Branch: `feature/bff-security-p0-remediation` (iaop-agent-bf
 
 | Repository | Starting SHA | Final SHA | Changes | Tests | Status |
 |---|---|---|---|---|---|
-| iaop-agent-bff | 81a88d66 | 91b6065 (branch) | Verified JWT permissions, fail-closed workspace authz, atomic session mutations, synthetic-data removal | NOT EXECUTED — local MSVC C++ toolchain broken (`ring`/`vcruntime.h`); needs CI or dev machine | PARTIAL |
+| iaop-agent-bff | 81a88d66 | 522ac5d (PR #12) | Verified JWT permissions, fail-closed workspace authz, atomic session mutations, synthetic-data removal, fail-closed token encryption, request-path token refresh w/ rotation+singleflight, readiness docs corrected | NOT EXECUTED — local MSVC C++ toolchain broken (`ring`/`vcruntime.h`); needs CI or dev machine | PARTIAL |
 | iaop-agent-service | 551b211b | branch HEAD | Resource-level read authorization (self-or-staff) on all agent read endpoints | NOT EXECUTED — same toolchain blocker | PARTIAL |
 | iaop-agency-service | 266c8da1 | unchanged | Org-scope resource authz NOT implemented — requires subject→agent_id resolution client (see blockers) | — | BLOCKED |
-| iaop-rust-common | 7402c86b | unchanged | JWKS hardening (§11) not started | — | NOT STARTED |
+| iaop-rust-common | 7402c86b | 620bd63 (PR #8 → development) | JWKS singleflight refresh, stale-key grace window, concurrency test | NOT EXECUTED — same toolchain blocker | PARTIAL |
 
 ## B. Defect closure
 
@@ -21,7 +21,11 @@ Date: 2026-11-15 · Branch: `feature/bff-security-p0-remediation` (iaop-agent-bf
 | §6 P0 (agent) | `agent:read` allowed reading ANY agent | `authorize_agent_read`: staff roles OR ACTIVE identity link matching target agent_id; list endpoint staff-only | code: `agents.rs` | FIXED (unverified compile) |
 | §6 P0 (agency) | No org-scope resource authz | NOT DONE — no subject→agent resolution path exists in agency-service | — | BLOCKED |
 | §7 P0 | Synthetic team/dashboard data | `TeamMemberDto`/`AgencyHierarchyNodeDto`/dashboard counts now `Option` — `None` until authoritative source exists; concurrent JoinSet enrichment (no N+1, no fabricated names/codes/counts) | code: `agency.rs`, `today.rs` | FIXED (unverified compile) |
-| §8–§15 P1 | Identity error semantics (partially done pre-session), token exchange, revocation, JWKS hardening, session encryption, performance | Not addressed this session | — | NOT DONE |
+| §9 P1 (partial) | Token refresh never invoked in request path | `ensure_fresh_session` in principal extractor: 60s skew refresh, per-session singleflight, atomic encrypted `update_tokens`, rotation via COALESCE, revoked→session invalidated, transient→503 | code: `principal.rs`, `oidc.rs`, `session.rs`, `pg_session.rs` | FIXED (unverified compile) |
+| §11 P1 (partial) | JWKS cache missing singleflight/stale policy | Singleflight refresh lock + double-check, stale-key grace (3x TTL), concurrency test | code: `jwks.rs` (rust-common PR #8) | FIXED (unverified compile) |
+| §12 P1 (partial) | Plaintext token fallback when DB configured without key | `SESSIONS_ENCRYPTION_KEY` mandatory whenever `DATABASE_URL` set; `PgSessionStore` fails closed without cipher | code: `config.rs`, `pg_session.rs` | FIXED (unverified compile) |
+| §2/§20 | "CERTIFIED PRODUCTION READY" claim inaccurate | Correction notices added to 5 readiness docs; final report verdict NOT READY | docs commits | DONE |
+| §8, §10, §13–§15 P1 | Identity error semantics completion, dynamic revocation, performance fundamentals, Kafka/outbox re-verification, reference-standard contract tests | Not addressed | — | NOT DONE |
 
 ## C. Security matrix (implemented, pending runtime verification)
 
@@ -54,6 +58,12 @@ NOT MEASURED — no fabricated benchmarks published.
 3. **Token exchange (RFC 8693)**: not attempted; multi-audience forwarding remains the compatibility mode.
 4. **JWKS hardening, session encryption audit, revocation freshness, k6 benchmarks**: not started.
 5. **Branch protection**: now ACTIVE via rulesets (all 31 repos public); `development` requires PR + approval — merges need owner approval.
+
+## Open PRs awaiting owner approval (ruleset-enforced)
+
+- iaop-agent-bff PR #12 → development (5 commits)
+- iaop-agent-service PR #13 → development
+- iaop-rust-common PR #8 → development
 
 ## H. Final verdict
 
