@@ -70,6 +70,158 @@ pub struct UpdatePreferencesRequest {
     pub expected_version: Option<i64>,
 }
 
+/// Helper to extract dynamic permissions and roles from authenticated JWT payload
+fn extract_permissions_from_jwt(token: &str) -> Vec<String> {
+    use base64::Engine;
+    use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
+
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() < 2 {
+        return vec![
+            "agent:profile:read".to_string(),
+            "agent:dashboard:read".to_string(),
+        ];
+    }
+    let payload_str = parts[1];
+    let decoded_bytes = URL_SAFE_NO_PAD
+        .decode(payload_str)
+        .or_else(|_| URL_SAFE.decode(payload_str));
+
+    let Ok(bytes) = decoded_bytes else {
+        return vec![
+            "agent:profile:read".to_string(),
+            "agent:dashboard:read".to_string(),
+        ];
+    };
+
+    let Ok(val) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return vec![
+            "agent:profile:read".to_string(),
+            "agent:dashboard:read".to_string(),
+        ];
+    };
+
+    let mut permissions = Vec::new();
+    // 1. realm_access.roles
+    if let Some(roles) = val
+        .pointer("/realm_access/roles")
+        .and_then(|v| v.as_array())
+    {
+        for r in roles {
+            if let Some(s) = r.as_str() {
+                permissions.push(s.to_string());
+            }
+        }
+    }
+    // 2. resource_access.*.roles
+    if let Some(res) = val.pointer("/resource_access").and_then(|v| v.as_object()) {
+        for (_client, client_val) in res {
+            if let Some(roles) = client_val.get("roles").and_then(|v| v.as_array()) {
+                for r in roles {
+                    if let Some(s) = r.as_str() {
+                        permissions.push(s.to_string());
+                    }
+                }
+            }
+        }
+    }
+    // 3. scope
+    if let Some(scope_str) = val.get("scope").and_then(|v| v.as_str()) {
+        for s in scope_str.split_whitespace() {
+            permissions.push(format!("scope:{}", s));
+        }
+    }
+
+    if permissions.is_empty() {
+        permissions.push("agent:profile:read".to_string());
+        permissions.push("agent:dashboard:read".to_string());
+    }
+
+    permissions.sort();
+    permissions.dedup();
+    permissions
+}
+
+/// Helper to authoritatively resolve permitted workspaces for the principal
+pub async fn resolve_permitted_workspaces(
+    state: &AppState,
+    principal: &AuthenticatedPrincipal,
+) -> Vec<WorkspaceDto> {
+    let mut workspaces = Vec::new();
+
+    if let (Some(agency_client), Some(aid)) = (&state.agency_client, principal.agent_id) {
+        match agency_client
+            .get_current_assignment(aid, &principal.access_token, principal.request_id)
+            .await
+        {
+            Ok(Some(assignment)) => {
+                match agency_client
+                    .get_unit(
+                        assignment.unit_id,
+                        &principal.access_token,
+                        principal.request_id,
+                    )
+                    .await
+                {
+                    Ok(unit) => {
+                        workspaces.push(WorkspaceDto {
+                            id: unit.id.to_string(),
+                            name: unit.name,
+                            agency_code: Some(unit.code),
+                            role: assignment.assignment_type.clone(),
+                            is_default: true,
+                        });
+
+                        if let Ok(ancestors) = agency_client
+                            .get_ancestors(
+                                assignment.unit_id,
+                                &principal.access_token,
+                                principal.request_id,
+                            )
+                            .await
+                        {
+                            for anc in ancestors {
+                                workspaces.push(WorkspaceDto {
+                                    id: anc.id.to_string(),
+                                    name: anc.name,
+                                    agency_code: Some(anc.code),
+                                    role: "PARENT_UNIT".to_string(),
+                                    is_default: false,
+                                });
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, unit_id = %assignment.unit_id, "Failed to resolve agency unit for workspace");
+                    }
+                }
+            }
+            Ok(None) => {
+                tracing::debug!(agent_id = %aid, "Agent has no active agency assignment; candidate workspace granted");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, agent_id = %aid, "Failed to query agency assignment");
+            }
+        }
+    }
+
+    if workspaces.is_empty() {
+        let default_id = principal
+            .workspace_id
+            .clone()
+            .unwrap_or_else(|| "workspace-candidate".to_string());
+        workspaces.push(WorkspaceDto {
+            id: default_id,
+            name: "Default Agent Workspace".to_string(),
+            agency_code: None,
+            role: "AGENT".to_string(),
+            is_default: true,
+        });
+    }
+
+    workspaces
+}
+
 /// GET /api/v1/me — IDENTITY-01
 pub async fn get_me(
     State(state): State<AppState>,
@@ -101,10 +253,14 @@ pub async fn get_me(
         }
     }
 
-    let default_workspace = principal
+    let permitted = resolve_permitted_workspaces(&state, &principal).await;
+    let active_workspace = principal
         .workspace_id
         .clone()
-        .unwrap_or_else(|| "default".to_string());
+        .filter(|id| permitted.iter().any(|w| &w.id == id))
+        .or_else(|| permitted.first().map(|w| w.id.clone()));
+
+    let permissions = extract_permissions_from_jwt(&principal.access_token);
 
     let profile = UserProfileDto {
         subject: principal.subject,
@@ -112,13 +268,8 @@ pub async fn get_me(
         agent_id,
         agent_code,
         lifecycle_status,
-        active_workspace: Some(default_workspace),
-        permissions: vec![
-            "agent:profile:read".to_string(),
-            "agent:dashboard:read".to_string(),
-            "agent:tasks:manage".to_string(),
-            "agent:search:read".to_string(),
-        ],
+        active_workspace,
+        permissions,
         locale: "id-ID".to_string(),
         timezone: "Asia/Jakarta".to_string(),
         session_expires_at: Some(Utc::now() + chrono::Duration::hours(8)),
@@ -135,25 +286,20 @@ pub async fn get_me(
 
 /// GET /api/v1/me/workspaces — IDENTITY-02
 pub async fn get_workspaces(
-    _state: State<AppState>,
+    State(state): State<AppState>,
     principal: AuthenticatedPrincipal,
 ) -> Result<FeResponse<WorkspaceListResponse>, FeErrorResponse> {
+    let permitted = resolve_permitted_workspaces(&state, &principal).await;
     let active = principal
         .workspace_id
         .clone()
-        .unwrap_or_else(|| "workspace-primary".to_string());
-    let workspaces = vec![WorkspaceDto {
-        id: "workspace-primary".to_string(),
-        name: "Kantor Pusat / General Agency".to_string(),
-        agency_code: Some("AG-001".to_string()),
-        role: "AGENT".to_string(),
-        is_default: true,
-    }];
+        .filter(|id| permitted.iter().any(|w| &w.id == id))
+        .or_else(|| permitted.first().map(|w| w.id.clone()));
 
     Ok(FeResponse::ok(
         WorkspaceListResponse {
-            workspaces,
-            active_workspace_id: Some(active),
+            workspaces: permitted,
+            active_workspace_id: active,
         },
         principal.request_id,
         principal.correlation_id,
@@ -169,6 +315,18 @@ pub async fn select_workspace(
     if payload.workspace_id.trim().is_empty() {
         return Err(FeErrorResponse::invalid_request(
             "workspaceId cannot be empty",
+            principal.request_id,
+            principal.correlation_id,
+        ));
+    }
+
+    let permitted = resolve_permitted_workspaces(&state, &principal).await;
+    if state.agency_client.is_some() && !permitted.iter().any(|w| w.id == payload.workspace_id) {
+        return Err(FeErrorResponse::forbidden(
+            format!(
+                "User is not authorized for workspace '{}'",
+                payload.workspace_id
+            ),
             principal.request_id,
             principal.correlation_id,
         ));

@@ -62,6 +62,19 @@ pub struct AgencyView {
     pub status: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnitAssignmentView {
+    pub id: Uuid,
+    pub agent_id: Uuid,
+    pub unit_id: Uuid,
+    pub assignment_type: String,
+    pub status: String,
+    pub effective_from: NaiveDate,
+    pub effective_to: Option<NaiveDate>,
+    pub version: i64,
+}
+
 #[derive(Clone)]
 pub struct AgencyClient {
     base_url: String,
@@ -187,6 +200,35 @@ impl AgencyClient {
         }
 
         let body = resp.json::<Vec<AgencyView>>().await?;
+        Ok(body)
+    }
+
+    /// GET /api/v1/organization-units/{unit_id}/assignments
+    pub async fn get_unit_assignments(
+        &self,
+        unit_id: Uuid,
+        bearer_token: &str,
+        request_id: Option<Uuid>,
+    ) -> Result<Vec<UnitAssignmentView>, AgencyClientError> {
+        let url = format!(
+            "{}/api/v1/organization-units/{}/assignments",
+            self.base_url, unit_id
+        );
+        let mut req = self.client.get(&url).bearer_auth(bearer_token);
+
+        if let Some(rid) = request_id {
+            req = req.header("X-Request-ID", rid.to_string());
+        }
+
+        let resp = req.send().await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let message = resp.text().await.unwrap_or_default();
+            return Err(AgencyClientError::Upstream { status, message });
+        }
+
+        let body = resp.json::<Vec<UnitAssignmentView>>().await?;
         Ok(body)
     }
 }

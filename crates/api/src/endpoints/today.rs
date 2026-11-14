@@ -139,27 +139,59 @@ pub async fn get_today(
     let mut lifecycle_status = "UNKNOWN".to_string();
     let mut eligibility_section = SectionResult::unavailable("Agent service unconfigured");
 
-    if let (Some(client), Some(aid)) = (&state.agent_client, principal.agent_id) {
-        match client
-            .get_agent(aid, &principal.access_token, principal.request_id)
-            .await
-        {
-            Ok(view) => {
+    // Concurrently fetch agent profile and eligibility decision using Tokio concurrency
+    let agent_fut = async {
+        if let (Some(client), Some(aid)) = (&state.agent_client, principal.agent_id) {
+            Some(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    client.get_agent(aid, &principal.access_token, principal.request_id),
+                )
+                .await,
+            )
+        } else {
+            None
+        }
+    };
+
+    let elig_fut = async {
+        if let (Some(elig_client), Some(aid)) = (&state.eligibility_client, principal.agent_id) {
+            Some(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    elig_client.verify_eligibility(
+                        aid,
+                        &principal.access_token,
+                        principal.request_id,
+                    ),
+                )
+                .await,
+            )
+        } else {
+            None
+        }
+    };
+
+    let (agent_outcome, elig_outcome) = tokio::join!(agent_fut, elig_fut);
+
+    if state.agent_client.is_none() {
+        partial = true;
+        unavailable.push("agent_service".to_string());
+    } else {
+        match agent_outcome {
+            Some(Ok(Ok(view))) => {
                 lifecycle_status = view.lifecycle_status.clone();
                 match view.lifecycle_status.as_str() {
                     "ACTIVE" => {
-                        // ACTIVE agents must have their selling eligibility verified by the authoritative service.
-                        // ACTIVE != eligible (licenses, sanctions, compliance, CPD).
-                        if let Some(eligibility_client) = &state.eligibility_client {
-                            match eligibility_client
-                                .verify_eligibility(
-                                    aid,
-                                    &principal.access_token,
-                                    principal.request_id,
-                                )
-                                .await
-                            {
-                                Ok(dec) => {
+                        if state.eligibility_client.is_none() {
+                            partial = true;
+                            unavailable.push("eligibility_service".to_string());
+                            eligibility_section = SectionResult::unavailable(
+                                "Authoritative eligibility service is not configured",
+                            );
+                        } else {
+                            match elig_outcome {
+                                Some(Ok(Ok(dec))) => {
                                     eligibility_section =
                                         SectionResult::available(EligibilitySummary {
                                             is_eligible: dec.is_eligible,
@@ -167,7 +199,7 @@ pub async fn get_today(
                                             valid_until: dec.valid_until,
                                         });
                                 }
-                                Err(e) => {
+                                Some(Ok(Err(e))) => {
                                     tracing::warn!(error = %e, "authoritative eligibility service unreachable");
                                     partial = true;
                                     unavailable.push("eligibility_service".to_string());
@@ -175,14 +207,22 @@ pub async fn get_today(
                                         "Authoritative eligibility service unavailable",
                                     );
                                 }
+                                Some(Err(_)) => {
+                                    tracing::warn!("authoritative eligibility query timed out");
+                                    partial = true;
+                                    unavailable.push("eligibility_service".to_string());
+                                    eligibility_section = SectionResult::unavailable(
+                                        "Authoritative eligibility service timed out",
+                                    );
+                                }
+                                None => {
+                                    partial = true;
+                                    unavailable.push("eligibility_service".to_string());
+                                    eligibility_section = SectionResult::unavailable(
+                                        "Authoritative eligibility service is not configured",
+                                    );
+                                }
                             }
-                        } else {
-                            // Downstream eligibility service is not configured: fail closed.
-                            partial = true;
-                            unavailable.push("eligibility_service".to_string());
-                            eligibility_section = SectionResult::unavailable(
-                                "Authoritative eligibility service is not configured",
-                            );
                         }
                     }
                     "SUSPENDED" => {
@@ -208,16 +248,24 @@ pub async fn get_today(
                     }
                 }
             }
-            Err(e) => {
+            Some(Ok(Err(e))) => {
                 tracing::warn!(error = %e, "failed to query agent service for today dashboard");
                 partial = true;
                 unavailable.push("agent_service".to_string());
                 eligibility_section = SectionResult::unavailable("Agent service unavailable");
             }
+            Some(Err(_)) => {
+                tracing::warn!("agent service query timed out");
+                partial = true;
+                unavailable.push("agent_service".to_string());
+                eligibility_section = SectionResult::unavailable("Agent service query timed out");
+            }
+            None => {
+                partial = true;
+                unavailable.push("agent_service".to_string());
+                eligibility_section = SectionResult::unavailable("Agent service unconfigured");
+            }
         }
-    } else if state.agent_client.is_none() {
-        partial = true;
-        unavailable.push("agent_service".to_string());
     }
 
     let is_eligible = eligibility_section

@@ -207,6 +207,26 @@ pub async fn callback(
         return err(StatusCode::UNAUTHORIZED, "nonce mismatch");
     }
 
+    // Authoritatively resolve agent identity link from issuer + subject
+    let mut agent_id = None;
+    if let Some(client) = &state.agent_client {
+        match client
+            .resolve_identity(&claims.iss, &claims.sub, &tokens.access_token, None)
+            .await
+        {
+            Ok(Some(link)) => {
+                tracing::info!(subject = %claims.sub, agent_id = %link.agent_id, "resolved active agent identity link");
+                agent_id = Some(link.agent_id);
+            }
+            Ok(None) => {
+                tracing::info!(subject = %claims.sub, "user has no linked agent (candidate/unlinked state)");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, subject = %claims.sub, "identity resolution query failed; proceeding without agent link");
+            }
+        }
+    }
+
     let session_id = new_session_id();
     let session = Session {
         id: session_id.clone(),
@@ -222,7 +242,7 @@ pub async fn callback(
         absolute_timeout: Duration::from_secs(state.config.session_absolute_timeout_secs),
         csrf_token: random_token(),
         workspace_id: None,
-        agent_id: None,
+        agent_id,
     };
     if auth.store.create_session(session).await.is_err() {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "session store error");

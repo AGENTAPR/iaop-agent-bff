@@ -1,4 +1,8 @@
 //! Recruitment endpoints (Group 6.4: RECRUITMENT-01 .. RECRUITMENT-04)
+//!
+//! Authoritative integration: downstream Recruitment Service required.
+//! No candidate data is generated, persisted, or returned without
+//! a real `iaop-recruitment-service` backing these calls.
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -7,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::envelope::{FeErrorResponse, FeResponse};
+use crate::envelope::{CanonicalErrorCode, FeErrorResponse, FeResponse};
 use crate::principal::AuthenticatedPrincipal;
 use crate::state::AppState;
 
@@ -41,34 +45,36 @@ pub struct ReferralSummaryDto {
     pub recent_candidates: Vec<CandidateDto>,
 }
 
-/// GET /api/v1/recruitment/candidates — RECRUITMENT-01
-pub async fn list_candidates(
-    _state: State<AppState>,
-    principal: AuthenticatedPrincipal,
-) -> Result<FeResponse<Vec<CandidateDto>>, FeErrorResponse> {
-    let candidates = vec![CandidateDto {
-        id: Uuid::now_v7(),
-        full_name: "Budi Santoso".to_string(),
-        email: "budi.santoso@example.com".to_string(),
-        phone: "+628123456789".to_string(),
-        status: "SCREENING".to_string(),
-        referrer_agent_id: principal.agent_id,
-        created_at: Utc::now() - chrono::Duration::days(2),
-    }];
-
-    Ok(FeResponse::ok(
-        candidates,
+fn recruitment_unavailable(principal: &AuthenticatedPrincipal) -> FeErrorResponse {
+    FeErrorResponse::new(
+        CanonicalErrorCode::DependencyUnavailable,
+        "Recruitment service is not configured. Downstream iaop-recruitment-service required.",
         principal.request_id,
         principal.correlation_id,
-    ))
+    )
+}
+
+/// GET /api/v1/recruitment/candidates — RECRUITMENT-01
+pub async fn list_candidates(
+    State(state): State<AppState>,
+    principal: AuthenticatedPrincipal,
+) -> Result<FeResponse<Vec<CandidateDto>>, FeErrorResponse> {
+    if state.config.recruitment_service_url.is_none() {
+        return Err(recruitment_unavailable(&principal));
+    }
+    // Recruitment service integration not yet implemented.
+    Err(recruitment_unavailable(&principal))
 }
 
 /// POST /api/v1/recruitment/candidates — RECRUITMENT-02
+/// Creates a recruitment candidate via the authoritative Recruitment Service.
+/// Returns 503 if the service is not configured — never synthesizes a candidate ID.
 pub async fn create_candidate(
-    _state: State<AppState>,
+    State(state): State<AppState>,
     principal: AuthenticatedPrincipal,
     Json(payload): Json<CreateCandidateRequest>,
 ) -> Result<FeResponse<CandidateDto>, FeErrorResponse> {
+    // Input validation first (before any downstream call)
     if payload.full_name.trim().is_empty() || payload.email.trim().is_empty() {
         return Err(FeErrorResponse::validation(
             "Name and email are required",
@@ -78,69 +84,34 @@ pub async fn create_candidate(
         ));
     }
 
-    let candidate = CandidateDto {
-        id: Uuid::now_v7(),
-        full_name: payload.full_name,
-        email: payload.email,
-        phone: payload.phone,
-        status: "APPLIED".to_string(),
-        referrer_agent_id: principal.agent_id,
-        created_at: Utc::now(),
-    };
+    if state.config.recruitment_service_url.is_none() {
+        return Err(recruitment_unavailable(&principal));
+    }
 
-    Ok(FeResponse::ok(
-        candidate,
-        principal.request_id,
-        principal.correlation_id,
-    ))
+    // Recruitment service integration not yet implemented.
+    // Will delegate to recruitment-service POST /api/v1/candidates when available.
+    Err(recruitment_unavailable(&principal))
 }
 
 /// GET /api/v1/recruitment/candidates/{candidateId} — RECRUITMENT-03
 pub async fn get_candidate(
-    _state: State<AppState>,
+    State(state): State<AppState>,
     principal: AuthenticatedPrincipal,
-    Path(candidate_id): Path<Uuid>,
+    Path(_candidate_id): Path<Uuid>,
 ) -> Result<FeResponse<CandidateDto>, FeErrorResponse> {
-    let candidate = CandidateDto {
-        id: candidate_id,
-        full_name: "Budi Santoso".to_string(),
-        email: "budi.santoso@example.com".to_string(),
-        phone: "+628123456789".to_string(),
-        status: "SCREENING".to_string(),
-        referrer_agent_id: principal.agent_id,
-        created_at: Utc::now() - chrono::Duration::days(2),
-    };
-
-    Ok(FeResponse::ok(
-        candidate,
-        principal.request_id,
-        principal.correlation_id,
-    ))
+    if state.config.recruitment_service_url.is_none() {
+        return Err(recruitment_unavailable(&principal));
+    }
+    Err(recruitment_unavailable(&principal))
 }
 
 /// GET /api/v1/recruitment/my-referrals — RECRUITMENT-04
 pub async fn get_my_referrals(
-    _state: State<AppState>,
+    State(state): State<AppState>,
     principal: AuthenticatedPrincipal,
 ) -> Result<FeResponse<ReferralSummaryDto>, FeErrorResponse> {
-    let summary = ReferralSummaryDto {
-        total_referred: 3,
-        in_progress: 1,
-        successfully_onboarded: 2,
-        recent_candidates: vec![CandidateDto {
-            id: Uuid::now_v7(),
-            full_name: "Budi Santoso".to_string(),
-            email: "budi.santoso@example.com".to_string(),
-            phone: "+628123456789".to_string(),
-            status: "SCREENING".to_string(),
-            referrer_agent_id: principal.agent_id,
-            created_at: Utc::now() - chrono::Duration::days(2),
-        }],
-    };
-
-    Ok(FeResponse::ok(
-        summary,
-        principal.request_id,
-        principal.correlation_id,
-    ))
+    if state.config.recruitment_service_url.is_none() {
+        return Err(recruitment_unavailable(&principal));
+    }
+    Err(recruitment_unavailable(&principal))
 }

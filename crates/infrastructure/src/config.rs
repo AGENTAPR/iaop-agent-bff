@@ -53,6 +53,9 @@ pub struct AppConfig {
     pub notification_service_url: Option<String>,
     pub document_service_url: Option<String>,
     pub performance_service_url: Option<String>,
+    pub claims_service_url: Option<String>,
+    pub customer_service_url: Option<String>,
+    pub policies_service_url: Option<String>,
 }
 
 impl AppConfig {
@@ -160,6 +163,15 @@ impl AppConfig {
                 .ok()
                 .filter(|v| !v.is_empty()),
             performance_service_url: std::env::var("PERFORMANCE_SERVICE_URL")
+                .ok()
+                .filter(|v| !v.is_empty()),
+            claims_service_url: std::env::var("CLAIMS_SERVICE_URL")
+                .ok()
+                .filter(|v| !v.is_empty()),
+            customer_service_url: std::env::var("CUSTOMER_SERVICE_URL")
+                .ok()
+                .filter(|v| !v.is_empty()),
+            policies_service_url: std::env::var("POLICIES_SERVICE_URL")
                 .ok()
                 .filter(|v| !v.is_empty()),
         })

@@ -1,4 +1,7 @@
 //! Policy servicing endpoints (Group 6.12: POLICIES-01 .. POLICIES-02)
+//!
+//! Authoritative integration: downstream Policies/Core Insurance Service required.
+//! These endpoints are EXPLICITLY UNAVAILABLE until `POLICIES_SERVICE_URL` is configured.
 
 use axum::extract::{Path, State};
 use chrono::{DateTime, Utc};
@@ -6,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::envelope::{FeErrorResponse, FeResponse};
+use crate::envelope::{CanonicalErrorCode, FeErrorResponse, FeResponse};
 use crate::principal::AuthenticatedPrincipal;
 use crate::state::AppState;
 
@@ -24,51 +27,34 @@ pub struct PolicySummaryDto {
     pub source_freshness_as_of: DateTime<Utc>,
 }
 
-/// GET /api/v1/policies — POLICIES-01
-pub async fn list_policies(
-    _state: State<AppState>,
-    principal: AuthenticatedPrincipal,
-) -> Result<FeResponse<Vec<PolicySummaryDto>>, FeErrorResponse> {
-    let policies = vec![PolicySummaryDto {
-        policy_id: Uuid::now_v7(),
-        policy_number: "POL-ID-20240901".to_string(),
-        product_name: "Nusantara Term Life Proteksi Prima".to_string(),
-        policyholder_name: "Hendra Wijaya".to_string(),
-        sum_assured: "500000000.00".to_string(),
-        status: "IN_FORCE".to_string(),
-        next_premium_due_date: Some(Utc::now() + chrono::Duration::days(18)),
-        issued_at: Utc::now() - chrono::Duration::days(150),
-        source_freshness_as_of: Utc::now(),
-    }];
-
-    Ok(FeResponse::ok(
-        policies,
+fn policies_unavailable(principal: &AuthenticatedPrincipal) -> FeErrorResponse {
+    FeErrorResponse::new(
+        CanonicalErrorCode::DependencyUnavailable,
+        "Policies service is not configured. Downstream iaop-policies-service required.",
         principal.request_id,
         principal.correlation_id,
-    ))
+    )
+}
+
+/// GET /api/v1/policies — POLICIES-01
+pub async fn list_policies(
+    State(state): State<AppState>,
+    principal: AuthenticatedPrincipal,
+) -> Result<FeResponse<Vec<PolicySummaryDto>>, FeErrorResponse> {
+    if state.config.policies_service_url.is_none() {
+        return Err(policies_unavailable(&principal));
+    }
+    Err(policies_unavailable(&principal))
 }
 
 /// GET /api/v1/policies/{policyId} — POLICIES-02
 pub async fn get_policy(
-    _state: State<AppState>,
+    State(state): State<AppState>,
     principal: AuthenticatedPrincipal,
-    Path(policy_id): Path<Uuid>,
+    Path(_policy_id): Path<Uuid>,
 ) -> Result<FeResponse<PolicySummaryDto>, FeErrorResponse> {
-    let policy = PolicySummaryDto {
-        policy_id,
-        policy_number: "POL-ID-20240901".to_string(),
-        product_name: "Nusantara Term Life Proteksi Prima".to_string(),
-        policyholder_name: "Hendra Wijaya".to_string(),
-        sum_assured: "500000000.00".to_string(),
-        status: "IN_FORCE".to_string(),
-        next_premium_due_date: Some(Utc::now() + chrono::Duration::days(18)),
-        issued_at: Utc::now() - chrono::Duration::days(150),
-        source_freshness_as_of: Utc::now(),
-    };
-
-    Ok(FeResponse::ok(
-        policy,
-        principal.request_id,
-        principal.correlation_id,
-    ))
+    if state.config.policies_service_url.is_none() {
+        return Err(policies_unavailable(&principal));
+    }
+    Err(policies_unavailable(&principal))
 }

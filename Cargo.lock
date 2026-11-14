@@ -823,6 +823,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "iaop-security",
  "iaop_agent_bff-application",

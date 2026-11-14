@@ -215,4 +215,46 @@ impl AgentClient {
             .map_err(|e| AgentClientError::Serialization(e.to_string()))?;
         Ok(body.data)
     }
+
+    pub async fn resolve_identity(
+        &self,
+        issuer: &str,
+        subject: &str,
+        token: &str,
+        request_id: Option<Uuid>,
+    ) -> Result<Option<IdentityLinkView>, AgentClientError> {
+        let url = format!(
+            "{}/api/v1/identity-links/resolve",
+            self.base_url.trim_end_matches('/')
+        );
+        let mut req = self
+            .http
+            .get(&url)
+            .query(&[("issuer", issuer), ("subject", subject)])
+            .bearer_auth(token);
+        if let Some(rid) = request_id {
+            req = req
+                .header("x-request-id", rid.to_string())
+                .header("x-correlation-id", rid.to_string());
+        }
+
+        let resp = req.send().await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(AgentClientError::Upstream {
+                status,
+                message: text,
+            });
+        }
+
+        let link: IdentityLinkView = resp
+            .json()
+            .await
+            .map_err(|e| AgentClientError::Serialization(e.to_string()))?;
+        Ok(Some(link))
+    }
 }
