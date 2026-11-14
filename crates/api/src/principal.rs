@@ -90,13 +90,13 @@ async fn ensure_fresh_session(
     if session.access_expires_at > Utc::now() + REFRESH_SKEW {
         return Ok(session);
     }
-    let Some(rt) = session.refresh_token.clone() else {
+    if session.refresh_token.is_none() {
         return Err(FeErrorResponse::unauthenticated(
             "Session expired. Please sign in again.",
             req_id,
             corr_id,
         ));
-    };
+    }
 
     // Singleflight per session: concurrent requests wait, then re-check.
     let lock = session_refresh_lock(&session.id);

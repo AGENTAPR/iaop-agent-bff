@@ -66,11 +66,17 @@ async fn test_auth_state() -> (AppState, String, String) {
         &oidc.issuer,
         &oidc.client_id,
     );
+    let access_validator = JwtValidator::new(
+        RemoteJwksProvider::new(oidc.jwks_uri()),
+        &oidc.issuer,
+        "iaop-agent-api",
+    );
 
     let auth = Some(Arc::new(AuthContext {
         oidc,
         store,
         id_validator,
+        access_validator,
     }));
 
     let state = AppState {
