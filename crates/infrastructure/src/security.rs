@@ -64,17 +64,16 @@ impl TokenCipher {
     }
 
     pub fn decrypt(&self, encoded: &str) -> Result<String, String> {
-        let raw = match BASE64_STANDARD.decode(encoded) {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                // If decoding fails, check if plaintext fallback during migration
-                return Ok(encoded.to_string());
-            }
-        };
+        let raw = BASE64_STANDARD
+            .decode(encoded)
+            .map_err(|e| format!("invalid base64 ciphertext: {e}"))?;
 
-        if raw.len() < 1 + 12 + 16 || raw[0] != 1u8 {
-            // Not a version 1 encrypted payload; fallback for smooth development migration
-            return Ok(encoded.to_string());
+        if raw.len() < 1 + 12 + 16 {
+            return Err("ciphertext payload too short".to_string());
+        }
+
+        if raw[0] != 1u8 {
+            return Err(format!("unsupported ciphertext version byte: {}", raw[0]));
         }
 
         let nonce = Nonce::from_slice(&raw[1..13]);
@@ -123,5 +122,48 @@ mod tests {
 
         let decrypted = cipher.decrypt(&encrypted).expect("decryption succeeds");
         assert_eq!(sample_token, decrypted);
+    }
+
+    #[test]
+    fn rejects_tampered_ciphertext() {
+        let cipher = TokenCipher::new("super-secret-test-key-for-iaop-bff");
+        let encrypted = cipher.encrypt("secret_token").expect("encrypt ok");
+        let mut raw = BASE64_STANDARD.decode(&encrypted).unwrap();
+        // Tamper with the last byte of the ciphertext/auth tag
+        let last = raw.len() - 1;
+        raw[last] ^= 0x55;
+        let tampered = BASE64_STANDARD.encode(&raw);
+
+        let err = cipher.decrypt(&tampered).unwrap_err();
+        assert!(
+            err.contains("token decryption failed"),
+            "Expected auth failure, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_plaintext_fallback() {
+        let cipher = TokenCipher::new("super-secret-test-key-for-iaop-bff");
+        let plaintext = "eyJhGciOi...plaintext-not-encrypted";
+        // Plaintext must NOT be accepted or returned
+        assert!(cipher.decrypt(plaintext).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_base64() {
+        let cipher = TokenCipher::new("super-secret-test-key-for-iaop-bff");
+        let err = cipher.decrypt("!!!not-base-64???").unwrap_err();
+        assert!(err.contains("invalid base64 ciphertext"));
+    }
+
+    #[test]
+    fn rejects_unsupported_version() {
+        let cipher = TokenCipher::new("super-secret-test-key-for-iaop-bff");
+        let encrypted = cipher.encrypt("secret").unwrap();
+        let mut raw = BASE64_STANDARD.decode(&encrypted).unwrap();
+        raw[0] = 99; // Set version to 99
+        let invalid_ver = BASE64_STANDARD.encode(&raw);
+        let err = cipher.decrypt(&invalid_ver).unwrap_err();
+        assert!(err.contains("unsupported ciphertext version byte: 99"));
     }
 }

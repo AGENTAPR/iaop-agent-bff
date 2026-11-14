@@ -158,9 +158,45 @@ pub async fn submit_proposal(
     if agent.lifecycle_status != "ACTIVE" {
         return Err(FeErrorResponse::selling_not_eligible(
             format!(
-                "Agent status is {} â€” selling commands are prohibited",
+                "Agent status is {} — selling commands are prohibited",
                 agent.lifecycle_status
             ),
+            principal.request_id,
+            principal.correlation_id,
+        ));
+    }
+
+    // Authoritative selling eligibility validation
+    let eligibility_client = match &state.eligibility_client {
+        Some(c) => c,
+        None => {
+            return Err(FeErrorResponse::new(
+                CanonicalErrorCode::DependencyUnavailable,
+                "Authoritative eligibility service is not configured; selling verification cannot be performed",
+                principal.request_id,
+                principal.correlation_id,
+            ));
+        }
+    };
+
+    let decision = eligibility_client
+        .verify_eligibility(aid, &principal.access_token, principal.request_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "submit_proposal: authoritative eligibility verification failed");
+            FeErrorResponse::new(
+                CanonicalErrorCode::DependencyFailure,
+                "Authoritative selling eligibility check failed; proposal submission rejected",
+                principal.request_id,
+                principal.correlation_id,
+            )
+        })?;
+
+    if !decision.is_eligible {
+        return Err(FeErrorResponse::selling_not_eligible(
+            decision
+                .reason
+                .unwrap_or_else(|| "Agent is not authorized for selling".to_string()),
             principal.request_id,
             principal.correlation_id,
         ));

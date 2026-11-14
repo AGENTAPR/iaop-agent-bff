@@ -45,6 +45,7 @@ pub struct AppConfig {
     pub learning_service_url: Option<String>,
     pub certification_service_url: Option<String>,
     pub sales_service_url: Option<String>,
+    pub eligibility_service_url: Option<String>,
     pub portfolio_service_url: Option<String>,
     pub commission_service_url: Option<String>,
     pub compliance_service_url: Option<String>,
@@ -74,6 +75,7 @@ impl AppConfig {
         let is_production = environment.eq_ignore_ascii_case("production");
         let database_url = std::env::var("DATABASE_URL").ok().filter(|s| !s.is_empty());
         let sessions_encryption_key = std::env::var("SESSIONS_ENCRYPTION_KEY")
+            .or_else(|_| std::env::var("BFF_SESSION_KEY"))
             .ok()
             .filter(|v| !v.is_empty());
 
@@ -133,6 +135,10 @@ impl AppConfig {
                 .ok()
                 .filter(|v| !v.is_empty()),
             sales_service_url: std::env::var("SALES_SERVICE_URL")
+                .ok()
+                .filter(|v| !v.is_empty()),
+            eligibility_service_url: std::env::var("ELIGIBILITY_SERVICE_URL")
+                .or_else(|_| std::env::var("COMPLIANCE_SERVICE_URL"))
                 .ok()
                 .filter(|v| !v.is_empty()),
             portfolio_service_url: std::env::var("PORTFOLIO_SERVICE_URL")

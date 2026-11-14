@@ -24,10 +24,11 @@ fn test_state() -> AppState {
         auth: None,
         agent_client: None,
         agency_client: None,
+        eligibility_client: None,
     }
 }
 
-fn test_auth_state() -> (AppState, String, String) {
+async fn test_auth_state() -> (AppState, String, String) {
     let cfg = AppConfig::from_env().expect("test config must load");
     let store = Arc::new(InMemorySessionStore::new());
 
@@ -50,6 +51,7 @@ fn test_auth_state() -> (AppState, String, String) {
             workspace_id: Some("ws-jakarta".to_string()),
             agent_id: Some(Uuid::now_v7()),
         })
+        .await
         .unwrap();
 
     let oidc = OidcConfig {
@@ -77,6 +79,7 @@ fn test_auth_state() -> (AppState, String, String) {
         auth,
         agent_client: None,
         agency_client: None,
+        eligibility_client: None,
     };
 
     (state, session_id, csrf_token)
@@ -119,7 +122,7 @@ async fn system_info_returns_metadata() {
 
 #[tokio::test]
 async fn unauthenticated_request_returns_401_fe_envelope() {
-    let (state, _, _) = test_auth_state();
+    let (state, _, _) = test_auth_state().await;
     let app = build_router(state);
 
     let response = app
@@ -142,7 +145,7 @@ async fn unauthenticated_request_returns_401_fe_envelope() {
 
 #[tokio::test]
 async fn authenticated_get_me_returns_200_fe_envelope() {
-    let (state, session_id, _) = test_auth_state();
+    let (state, session_id, _) = test_auth_state().await;
     let app = build_router(state);
 
     let response = app
@@ -166,7 +169,7 @@ async fn authenticated_get_me_returns_200_fe_envelope() {
 
 #[tokio::test]
 async fn mutating_request_without_csrf_returns_403() {
-    let (state, session_id, _) = test_auth_state();
+    let (state, session_id, _) = test_auth_state().await;
     let app = build_router(state);
 
     let body = serde_json::json!({
@@ -193,7 +196,7 @@ async fn mutating_request_without_csrf_returns_403() {
 
 #[tokio::test]
 async fn mutating_request_with_valid_csrf_succeeds() {
-    let (state, session_id, csrf_token) = test_auth_state();
+    let (state, session_id, csrf_token) = test_auth_state().await;
     let app = build_router(state);
 
     let body = serde_json::json!({
@@ -221,7 +224,7 @@ async fn mutating_request_with_valid_csrf_succeeds() {
 
 #[tokio::test]
 async fn today_dashboard_returns_sections_and_hero_action() {
-    let (state, session_id, _) = test_auth_state();
+    let (state, session_id, _) = test_auth_state().await;
     let app = build_router(state);
 
     let response = app
@@ -240,14 +243,15 @@ async fn today_dashboard_returns_sections_and_hero_action() {
 
     assert!(json["data"]["greeting"].is_string());
     assert!(json["data"]["heroAction"].is_object());
-    assert_eq!(json["data"]["priorityTasks"]["status"], "AVAILABLE");
-    assert_eq!(json["data"]["agenda"]["status"], "AVAILABLE");
+    assert_eq!(json["data"]["priorityTasks"]["status"], "UNAVAILABLE");
+    assert_eq!(json["data"]["agenda"]["status"], "UNAVAILABLE");
+    assert_eq!(json["data"]["partial"], true);
     assert_eq!(json["meta"]["schemaVersion"], "1.0");
 }
 
 #[tokio::test]
 async fn sales_products_unconfigured_returns_503() {
-    let (state, session_id, _) = test_auth_state();
+    let (state, session_id, _) = test_auth_state().await;
     let app = build_router(state);
 
     let response = app
@@ -268,7 +272,7 @@ async fn sales_products_unconfigured_returns_503() {
 
 #[tokio::test]
 async fn calculate_illustration_unconfigured_returns_503() {
-    let (state, session_id, csrf_token) = test_auth_state();
+    let (state, session_id, csrf_token) = test_auth_state().await;
     let app = build_router(state);
 
     let payload = serde_json::json!({

@@ -148,11 +148,42 @@ pub async fn get_today(
                 lifecycle_status = view.lifecycle_status.clone();
                 match view.lifecycle_status.as_str() {
                     "ACTIVE" => {
-                        eligibility_section = SectionResult::available(EligibilitySummary {
-                            is_eligible: true,
-                            reason: None,
-                            valid_until: Some(Utc::now() + chrono::Duration::days(30)),
-                        });
+                        // ACTIVE agents must have their selling eligibility verified by the authoritative service.
+                        // ACTIVE != eligible (licenses, sanctions, compliance, CPD).
+                        if let Some(eligibility_client) = &state.eligibility_client {
+                            match eligibility_client
+                                .verify_eligibility(
+                                    aid,
+                                    &principal.access_token,
+                                    principal.request_id,
+                                )
+                                .await
+                            {
+                                Ok(dec) => {
+                                    eligibility_section =
+                                        SectionResult::available(EligibilitySummary {
+                                            is_eligible: dec.is_eligible,
+                                            reason: dec.reason,
+                                            valid_until: dec.valid_until,
+                                        });
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "authoritative eligibility service unreachable");
+                                    partial = true;
+                                    unavailable.push("eligibility_service".to_string());
+                                    eligibility_section = SectionResult::unavailable(
+                                        "Authoritative eligibility service unavailable",
+                                    );
+                                }
+                            }
+                        } else {
+                            // Downstream eligibility service is not configured: fail closed.
+                            partial = true;
+                            unavailable.push("eligibility_service".to_string());
+                            eligibility_section = SectionResult::unavailable(
+                                "Authoritative eligibility service is not configured",
+                            );
+                        }
                     }
                     "SUSPENDED" => {
                         eligibility_section = SectionResult::available(EligibilitySummary {
@@ -225,9 +256,29 @@ pub async fn get_today(
         })
     };
 
-    let priority_tasks = SectionResult::available(Vec::new());
-    let agenda = SectionResult::available(Vec::new());
-    let recent_activity = SectionResult::available(Vec::new());
+    let priority_tasks = if state.config.workflow_service_url.is_none() {
+        partial = true;
+        unavailable.push("tasks".to_string());
+        SectionResult::unavailable("Workflow task service unconfigured")
+    } else {
+        SectionResult::available(Vec::new())
+    };
+
+    let agenda = if state.config.workflow_service_url.is_none() {
+        partial = true;
+        unavailable.push("agenda".to_string());
+        SectionResult::unavailable("Calendar and agenda service unconfigured")
+    } else {
+        SectionResult::available(Vec::new())
+    };
+
+    let recent_activity = if state.config.notification_service_url.is_none() {
+        partial = true;
+        unavailable.push("recent_activity".to_string());
+        SectionResult::unavailable("Notification and activity service unconfigured")
+    } else {
+        SectionResult::available(Vec::new())
+    };
 
     let dashboard = TodayDashboardDto {
         lifecycle_context: lifecycle_status,
@@ -254,12 +305,20 @@ pub async fn get_today(
     ))
 }
 
-/// GET /api/v1/me/tasks â€” TODAY-02
+/// GET /api/v1/me/tasks — TODAY-02
 pub async fn get_tasks(
-    _state: State<AppState>,
+    State(state): State<AppState>,
     principal: AuthenticatedPrincipal,
     Query(_query): Query<TaskListQuery>,
 ) -> Result<FeResponse<Vec<TaskItemDto>>, FeErrorResponse> {
+    if state.config.workflow_service_url.is_none() {
+        return Err(FeErrorResponse::new(
+            CanonicalErrorCode::DependencyUnavailable,
+            "Workflow task service is not configured",
+            principal.request_id,
+            principal.correlation_id,
+        ));
+    }
     let tasks: Vec<TaskItemDto> = Vec::new();
     Ok(FeResponse::ok(
         tasks,
@@ -270,9 +329,17 @@ pub async fn get_tasks(
 
 /// GET /api/v1/me/agenda
 pub async fn get_agenda(
-    _state: State<AppState>,
+    State(state): State<AppState>,
     principal: AuthenticatedPrincipal,
 ) -> Result<FeResponse<Vec<AgendaItemDto>>, FeErrorResponse> {
+    if state.config.workflow_service_url.is_none() {
+        return Err(FeErrorResponse::new(
+            CanonicalErrorCode::DependencyUnavailable,
+            "Calendar and agenda service is not configured",
+            principal.request_id,
+            principal.correlation_id,
+        ));
+    }
     let agenda: Vec<AgendaItemDto> = Vec::new();
     Ok(FeResponse::ok(
         agenda,

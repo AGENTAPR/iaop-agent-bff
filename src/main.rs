@@ -51,6 +51,9 @@ async fn main() -> anyhow::Result<()> {
             url.clone(),
         ))
     });
+    let eligibility_client = config.eligibility_service_url.as_ref().map(|url| {
+        Arc::new(iaop_agent_bff_infrastructure::clients::EligibilityClient::new(url.clone()))
+    });
 
     let state = AppState {
         config: Arc::new(config.clone()),
@@ -58,6 +61,7 @@ async fn main() -> anyhow::Result<()> {
         auth,
         agent_client,
         agency_client,
+        eligibility_client,
     };
     let app = build_router(state);
 
@@ -113,6 +117,9 @@ fn build_auth_context(
             ))
         }
         None => {
+            if config.environment.eq_ignore_ascii_case("production") {
+                panic!("FATAL: cannot run with InMemorySessionStore in production mode");
+            }
             tracing::warn!("running with InMemorySessionStore (DEV ONLY)");
             Arc::new(InMemorySessionStore::new())
         }

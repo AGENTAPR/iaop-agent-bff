@@ -176,9 +176,9 @@ pub async fn select_workspace(
 
     // Update workspace in active session
     if let Ok(auth) = state.auth() {
-        if let Some(mut session) = auth.store.get_session(&principal.session_id) {
+        if let Some(mut session) = auth.store.get_session(&principal.session_id).await {
             session.workspace_id = Some(payload.workspace_id.clone());
-            let _ = auth.store.update_session(&session);
+            let _ = auth.store.update_session(&session).await;
         }
     }
 

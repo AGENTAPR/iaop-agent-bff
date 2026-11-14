@@ -87,7 +87,7 @@ impl FromRequestParts<AppState> for AuthenticatedPrincipal {
             }
         };
 
-        let mut session = match auth.store.get_session(&sid) {
+        let mut session = match auth.store.get_session(&sid).await {
             Some(s) => s,
             None => {
                 return Err(FeErrorResponse::unauthenticated(
@@ -129,7 +129,7 @@ impl FromRequestParts<AppState> for AuthenticatedPrincipal {
 
         // Update session activity timestamp
         session.last_seen = std::time::Instant::now();
-        let _ = auth.store.update_session(&session);
+        let _ = auth.store.update_session(&session).await;
 
         Ok(AuthenticatedPrincipal {
             session_id: session.id,

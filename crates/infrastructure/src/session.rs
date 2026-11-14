@@ -58,22 +58,10 @@ impl LoginTransaction {
     }
 }
 
-/// Store trait — swap in-memory for PostgreSQL without changing handlers.
-pub trait SessionStore: Send + Sync {
-    fn create_session(&self, s: Session) -> Result<(), String>;
-    fn get_session(&self, id: &str) -> Option<Session>;
-    fn update_session(&self, s: &Session) -> Result<(), String>;
-    fn delete_session(&self, id: &str);
-    fn put_login_txn(&self, tx: LoginTransaction) -> Result<(), String>;
-    /// Atomically consumes a login transaction (single-use).
-    fn take_login_txn(&self, state: &str) -> Option<LoginTransaction>;
-}
-
-/// Async session store trait for PostgreSQL and other async adapters.
-/// Use this trait for production implementations; `SessionStore` is kept
-/// for the in-memory dev store.
+/// Async session store trait — production target is PostgreSQL adapter [`PgSessionStore`].
+/// Tokens live ONLY here — never in cookies or browser storage.
 #[async_trait::async_trait]
-pub trait AsyncSessionStore: Send + Sync {
+pub trait SessionStore: Send + Sync {
     async fn create_session(&self, s: Session) -> Result<(), String>;
     async fn get_session(&self, id: &str) -> Option<Session>;
     async fn update_session(&self, s: &Session) -> Result<(), String>;
@@ -82,6 +70,9 @@ pub trait AsyncSessionStore: Send + Sync {
     /// Atomically consumes a login transaction (single-use).
     async fn take_login_txn(&self, state: &str) -> Option<LoginTransaction>;
 }
+
+/// Compatibility alias: `AsyncSessionStore` is now identical to [`SessionStore`].
+pub use SessionStore as AsyncSessionStore;
 
 /// In-memory store (dev/single-instance). NOT for multi-instance prod.
 #[derive(Default)]
@@ -96,8 +87,9 @@ impl InMemorySessionStore {
     }
 }
 
+#[async_trait::async_trait]
 impl SessionStore for InMemorySessionStore {
-    fn create_session(&self, s: Session) -> Result<(), String> {
+    async fn create_session(&self, s: Session) -> Result<(), String> {
         self.sessions
             .lock()
             .map_err(|_| "store poisoned".to_string())?
@@ -105,7 +97,7 @@ impl SessionStore for InMemorySessionStore {
         Ok(())
     }
 
-    fn get_session(&self, id: &str) -> Option<Session> {
+    async fn get_session(&self, id: &str) -> Option<Session> {
         self.sessions
             .lock()
             .ok()?
@@ -114,7 +106,7 @@ impl SessionStore for InMemorySessionStore {
             .cloned()
     }
 
-    fn update_session(&self, s: &Session) -> Result<(), String> {
+    async fn update_session(&self, s: &Session) -> Result<(), String> {
         let mut map = self
             .sessions
             .lock()
@@ -123,13 +115,13 @@ impl SessionStore for InMemorySessionStore {
         Ok(())
     }
 
-    fn delete_session(&self, id: &str) {
+    async fn delete_session(&self, id: &str) {
         if let Ok(mut map) = self.sessions.lock() {
             map.remove(id);
         }
     }
 
-    fn put_login_txn(&self, tx: LoginTransaction) -> Result<(), String> {
+    async fn put_login_txn(&self, tx: LoginTransaction) -> Result<(), String> {
         self.txns
             .lock()
             .map_err(|_| "store poisoned".to_string())?
@@ -137,39 +129,12 @@ impl SessionStore for InMemorySessionStore {
         Ok(())
     }
 
-    fn take_login_txn(&self, state: &str) -> Option<LoginTransaction> {
+    async fn take_login_txn(&self, state: &str) -> Option<LoginTransaction> {
         self.txns
             .lock()
             .ok()?
             .remove(state)
             .filter(|t| t.is_valid())
-    }
-}
-
-#[async_trait::async_trait]
-impl AsyncSessionStore for InMemorySessionStore {
-    async fn create_session(&self, s: Session) -> Result<(), String> {
-        SessionStore::create_session(self, s)
-    }
-
-    async fn get_session(&self, id: &str) -> Option<Session> {
-        SessionStore::get_session(self, id)
-    }
-
-    async fn update_session(&self, s: &Session) -> Result<(), String> {
-        SessionStore::update_session(self, s)
-    }
-
-    async fn delete_session(&self, id: &str) {
-        SessionStore::delete_session(self, id)
-    }
-
-    async fn put_login_txn(&self, tx: LoginTransaction) -> Result<(), String> {
-        SessionStore::put_login_txn(self, tx)
-    }
-
-    async fn take_login_txn(&self, state: &str) -> Option<LoginTransaction> {
-        SessionStore::take_login_txn(self, state)
     }
 }
 
@@ -202,8 +167,8 @@ mod tests {
         assert!(!s.is_expired());
     }
 
-    #[test]
-    fn txn_single_use() {
+    #[tokio::test]
+    async fn txn_single_use() {
         let store = InMemorySessionStore::new();
         let tx = LoginTransaction {
             state: "s1".into(),
@@ -214,8 +179,8 @@ mod tests {
             created_at: Instant::now(),
             ttl: Duration::from_secs(300),
         };
-        SessionStore::put_login_txn(&store, tx).unwrap();
-        assert!(SessionStore::take_login_txn(&store, "s1").is_some());
-        assert!(SessionStore::take_login_txn(&store, "s1").is_none()); // replay rejected
+        store.put_login_txn(tx).await.unwrap();
+        assert!(store.take_login_txn("s1").await.is_some());
+        assert!(store.take_login_txn("s1").await.is_none()); // replay rejected
     }
 }

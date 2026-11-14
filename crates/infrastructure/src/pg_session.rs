@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 
 use crate::security::TokenCipher;
-use crate::session::{AsyncSessionStore, LoginTransaction, Session, SessionStore};
+use crate::session::{LoginTransaction, Session, SessionStore};
 
 /// PostgreSQL-backed session store.
 pub struct PgSessionStore {
@@ -29,7 +29,7 @@ impl PgSessionStore {
 }
 
 #[async_trait::async_trait]
-impl AsyncSessionStore for PgSessionStore {
+impl SessionStore for PgSessionStore {
     async fn create_session(&self, s: Session) -> Result<(), String> {
         let access_token = match &self.cipher {
             Some(c) => c
@@ -114,13 +114,25 @@ impl AsyncSessionStore for PgSessionStore {
 
         let raw_access: String = row.try_get("access_token").ok()?;
         let access_token = match &self.cipher {
-            Some(c) => c.decrypt(&raw_access).unwrap_or(raw_access),
+            Some(c) => match c.decrypt(&raw_access) {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::error!(error = %e, "pg_session: failed to decrypt access_token; rejecting compromised session");
+                    return None;
+                }
+            },
             None => raw_access,
         };
 
         let raw_refresh: Option<String> = row.try_get("refresh_token").ok()?;
         let refresh_token = match (&self.cipher, raw_refresh) {
-            (Some(c), Some(r)) => Some(c.decrypt(&r).unwrap_or(r)),
+            (Some(c), Some(r)) => match c.decrypt(&r) {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    tracing::error!(error = %e, "pg_session: failed to decrypt refresh_token; rejecting compromised session");
+                    return None;
+                }
+            },
             (None, Some(r)) => Some(r),
             _ => None,
         };
@@ -221,45 +233,6 @@ impl AsyncSessionStore for PgSessionStore {
             browser_binding: row.try_get("browser_binding").ok()?,
             created_at: Instant::now(),
             ttl: Duration::from_secs(1),
-        })
-    }
-}
-
-impl SessionStore for PgSessionStore {
-    fn create_session(&self, s: Session) -> Result<(), String> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(AsyncSessionStore::create_session(self, s))
-        })
-    }
-
-    fn get_session(&self, id: &str) -> Option<Session> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(AsyncSessionStore::get_session(self, id))
-        })
-    }
-
-    fn update_session(&self, s: &Session) -> Result<(), String> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(AsyncSessionStore::update_session(self, s))
-        })
-    }
-
-    fn delete_session(&self, id: &str) {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(AsyncSessionStore::delete_session(self, id))
-        })
-    }
-
-    fn put_login_txn(&self, tx: LoginTransaction) -> Result<(), String> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(AsyncSessionStore::put_login_txn(self, tx))
-        })
-    }
-
-    fn take_login_txn(&self, state: &str) -> Option<LoginTransaction> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(AsyncSessionStore::take_login_txn(self, state))
         })
     }
 }

@@ -17,4 +17,7 @@ pub struct AppState {
     pub agent_client: Option<std::sync::Arc<iaop_agent_bff_infrastructure::clients::AgentClient>>,
     /// Client for the authoritative Agency Service.
     pub agency_client: Option<std::sync::Arc<iaop_agent_bff_infrastructure::clients::AgencyClient>>,
+    /// Client for authoritative selling eligibility decisions.
+    pub eligibility_client:
+        Option<std::sync::Arc<iaop_agent_bff_infrastructure::clients::EligibilityClient>>,
 }

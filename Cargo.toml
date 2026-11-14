@@ -72,3 +72,4 @@ iaop-security.workspace = true
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+sqlx = { workspace = true }

@@ -121,7 +121,7 @@ pub async fn login(
         created_at: std::time::Instant::now(),
         ttl: TXN_TTL,
     };
-    if auth.store.put_login_txn(tx).is_err() {
+    if auth.store.put_login_txn(tx).await.is_err() {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "session store error");
     }
 
@@ -172,7 +172,7 @@ pub async fn callback(
     };
 
     // Single-use state + browser binding check.
-    let Some(tx) = auth.store.take_login_txn(&state_param) else {
+    let Some(tx) = auth.store.take_login_txn(&state_param).await else {
         return err(StatusCode::BAD_REQUEST, "invalid or expired state");
     };
     let bound = read_cookie(&headers, BINDING_COOKIE);
@@ -224,7 +224,7 @@ pub async fn callback(
         workspace_id: None,
         agent_id: None,
     };
-    if auth.store.create_session(session).is_err() {
+    if auth.store.create_session(session).await.is_err() {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "session store error");
     }
     tracing::info!(subject = %claims.sub, "login succeeded");
@@ -266,7 +266,7 @@ struct UserInfo {
 use serde::Serialize;
 
 #[allow(clippy::result_large_err)]
-fn session_from_request<'a>(
+async fn session_from_request<'a>(
     state: &'a AppState,
     headers: &'a HeaderMap,
 ) -> Result<
@@ -282,15 +282,16 @@ fn session_from_request<'a>(
     let mut s = auth
         .store
         .get_session(sid)
+        .await
         .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "session expired"))?;
     s.last_seen = std::time::Instant::now();
-    let _ = auth.store.update_session(&s);
+    let _ = auth.store.update_session(&s).await;
     Ok((auth, s))
 }
 
 /// GET /auth/session — safe session info only.
 pub async fn session_info(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    match session_from_request(&state, &headers) {
+    match session_from_request(&state, &headers).await {
         Ok((_, s)) => Json(SessionInfo {
             authenticated: true,
             user: Some(UserInfo {
@@ -330,10 +331,10 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Respon
         .get("x-csrf-token")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let session = auth.store.get_session(sid);
+    let session = auth.store.get_session(sid).await;
     match session {
         Some(s) if s.csrf_token == csrf => {
-            auth.store.delete_session(sid);
+            auth.store.delete_session(sid).await;
             tracing::info!("logout: session revoked");
             let mut resp = Json(serde_json::json!({"ok": true})).into_response();
             resp.headers_mut().append(

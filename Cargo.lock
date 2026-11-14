@@ -792,6 +792,7 @@ dependencies = [
  "iaop_agent_bff-infrastructure",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
  "tower",
  "tracing",
