@@ -107,8 +107,10 @@ pub struct TodayDashboardDto {
     pub priority_tasks: SectionResult<Vec<TaskItemDto>>,
     pub agenda: SectionResult<Vec<AgendaItemDto>>,
     pub recent_activity: SectionResult<Vec<ActivityItemDto>>,
-    pub customer_attention_count: u32,
-    pub open_claims_count: u32,
+    /// Authoritative count; `None` when no customer/claims read model is wired.
+    pub customer_attention_count: Option<u32>,
+    /// Authoritative count; `None` when no claims read model is wired.
+    pub open_claims_count: Option<u32>,
     pub as_of: DateTime<Utc>,
     pub partial: bool,
     pub unavailable_sections: Vec<String>,
@@ -352,8 +354,8 @@ pub async fn get_today(
         priority_tasks,
         agenda,
         recent_activity,
-        customer_attention_count: 0,
-        open_claims_count: 0,
+        customer_attention_count: None,
+        open_claims_count: None,
         as_of: Utc::now(),
         partial,
         unavailable_sections: unavailable,

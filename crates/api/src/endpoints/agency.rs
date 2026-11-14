@@ -17,7 +17,8 @@ use crate::state::AppState;
 pub struct AgencyHierarchyNodeDto {
     pub agency_id: String,
     pub agency_name: String,
-    pub leader_name: String,
+    /// Authoritative leader name — `None` until a leadership read is wired.
+    pub leader_name: Option<String>,
     pub level: String, // "GA", "UM", "AGENT"
     pub parent_agency_id: Option<String>,
 }
@@ -26,11 +27,15 @@ pub struct AgencyHierarchyNodeDto {
 #[serde(rename_all = "camelCase")]
 pub struct TeamMemberDto {
     pub agent_id: Uuid,
-    pub agent_code: String,
-    pub full_name: String,
+    /// Authoritative agent code; `None` when Agent Service is unreachable.
+    pub agent_code: Option<String>,
+    /// Authoritative display name; `None` — Agent Service exposes no name field yet.
+    pub full_name: Option<String>,
     pub role: String,
-    pub lifecycle_status: String,
-    pub active_proposals_count: u32,
+    /// Authoritative lifecycle status; `None` when Agent Service is unreachable.
+    pub lifecycle_status: Option<String>,
+    /// Authoritative proposal count; `None` — no sales read model is wired yet.
+    pub active_proposals_count: Option<u32>,
 }
 
 /// GET /api/v1/agency/hierarchy â€” AGENCY-01
@@ -99,7 +104,7 @@ pub async fn get_hierarchy(
             nodes.push(AgencyHierarchyNodeDto {
                 agency_id: anc.code,
                 agency_name: anc.name,
-                leader_name: "Pimpinan Unit".to_string(),
+                leader_name: None,
                 level: anc.kind,
                 parent_agency_id: anc.parent_id.map(|p| p.to_string()),
             });
@@ -117,7 +122,7 @@ pub async fn get_hierarchy(
         nodes.push(AgencyHierarchyNodeDto {
             agency_id: unit.code,
             agency_name: unit.name,
-            leader_name: "Pimpinan Unit".to_string(),
+            leader_name: None,
             level: unit.kind,
             parent_agency_id: unit.parent_id.map(|p| p.to_string()),
         });
@@ -188,28 +193,32 @@ pub async fn get_my_team(
                 }
             };
 
-            // Enrich member details authoritatively from Agent Service when configured
+            // Enrich member details authoritatively from Agent Service.
+            // Fetches run concurrently (bounded by member count); a failed
+            // lookup yields explicit `None` fields — never fabricated values.
             let mut enriched_team = Vec::with_capacity(other_members.len());
+            let mut set = tokio::task::JoinSet::new();
             for m in other_members {
-                let (code, status) = if let Some(agent_client) = &state.agent_client {
-                    match agent_client
-                        .get_agent(m.agent_id, &principal.access_token, principal.request_id)
-                        .await
-                    {
-                        Ok(agent) => (agent.agent_code, agent.lifecycle_status),
-                        Err(_) => (m.agent_id.to_string()[..8].to_uppercase(), m.status),
-                    }
-                } else {
-                    (m.agent_id.to_string()[..8].to_uppercase(), m.status)
-                };
-
+                let client = state.agent_client.clone();
+                let token = principal.access_token.clone();
+                let rid = principal.request_id;
+                set.spawn(async move {
+                    let view = match client {
+                        Some(c) => c.get_agent(m.agent_id, &token, rid).await.ok(),
+                        None => None,
+                    };
+                    (m, view)
+                });
+            }
+            while let Some(joined) = set.join_next().await {
+                let Ok((m, view)) = joined else { continue };
                 enriched_team.push(TeamMemberDto {
                     agent_id: m.agent_id,
-                    agent_code: code.clone(),
-                    full_name: format!("Agent {}", code),
+                    agent_code: view.as_ref().map(|v| v.agent_code.clone()),
+                    full_name: None,
                     role: m.assignment_type,
-                    lifecycle_status: status,
-                    active_proposals_count: 0,
+                    lifecycle_status: view.map(|v| v.lifecycle_status),
+                    active_proposals_count: None,
                 });
             }
             enriched_team
