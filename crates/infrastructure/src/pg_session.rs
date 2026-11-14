@@ -31,17 +31,24 @@ impl PgSessionStore {
 #[async_trait::async_trait]
 impl SessionStore for PgSessionStore {
     async fn create_session(&self, s: Session) -> Result<(), String> {
-        let access_token = match &self.cipher {
-            Some(c) => c
-                .encrypt(&s.access_token)
-                .map_err(|e| format!("cipher error: {e}"))?,
-            None => s.access_token.clone(),
-        };
+        // Fail closed: persistent OAuth tokens must never be stored in
+        // plaintext. A missing cipher is a configuration error, not a
+        // reason to degrade silently.
+        let cipher = self
+            .cipher
+            .as_ref()
+            .ok_or_else(|| "session token encryption is not configured".to_string())?;
+        let access_token = cipher
+            .encrypt(&s.access_token)
+            .map_err(|e| format!("cipher error: {e}"))?;
 
-        let refresh_token = match (&self.cipher, &s.refresh_token) {
-            (Some(c), Some(rt)) => Some(c.encrypt(rt).map_err(|e| format!("cipher error: {e}"))?),
-            (None, Some(rt)) => Some(rt.clone()),
-            _ => None,
+        let refresh_token = match &s.refresh_token {
+            Some(rt) => Some(
+                cipher
+                    .encrypt(rt)
+                    .map_err(|e| format!("cipher error: {e}"))?,
+            ),
+            None => None,
         };
 
         let sql = r#"
@@ -112,29 +119,26 @@ impl SessionStore for PgSessionStore {
             .to_std()
             .unwrap_or(Duration::ZERO);
 
+        let cipher = self.cipher.as_ref()?;
         let raw_access: String = row.try_get("access_token").ok()?;
-        let access_token = match &self.cipher {
-            Some(c) => match c.decrypt(&raw_access) {
-                Ok(t) => t,
-                Err(e) => {
-                    tracing::error!(error = %e, "pg_session: failed to decrypt access_token; rejecting compromised session");
-                    return None;
-                }
-            },
-            None => raw_access,
+        let access_token = match cipher.decrypt(&raw_access) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!(error = %e, "pg_session: failed to decrypt access_token; rejecting compromised session");
+                return None;
+            }
         };
 
         let raw_refresh: Option<String> = row.try_get("refresh_token").ok()?;
-        let refresh_token = match (&self.cipher, raw_refresh) {
-            (Some(c), Some(r)) => match c.decrypt(&r) {
+        let refresh_token = match raw_refresh {
+            Some(r) => match cipher.decrypt(&r) {
                 Ok(t) => Some(t),
                 Err(e) => {
                     tracing::error!(error = %e, "pg_session: failed to decrypt refresh_token; rejecting compromised session");
                     return None;
                 }
             },
-            (None, Some(r)) => Some(r),
-            _ => None,
+            None => None,
         };
 
         Some(Session {
