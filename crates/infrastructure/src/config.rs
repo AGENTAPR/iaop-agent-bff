@@ -91,12 +91,10 @@ impl AppConfig {
             ));
         }
 
-        if is_production {
-            if database_url.is_none() {
-                return Err(ConfigError::UnsafeConfig(
-                    "DATABASE_URL must be configured when ENVIRONMENT=production".into(),
-                ));
-            }
+        if is_production && database_url.is_none() {
+            return Err(ConfigError::UnsafeConfig(
+                "DATABASE_URL must be configured when ENVIRONMENT=production".into(),
+            ));
         }
 
         Ok(Self {
