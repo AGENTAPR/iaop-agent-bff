@@ -1,0 +1,73 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/domain",
+    "crates/application",
+    "crates/infrastructure",
+    "crates/api",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+license = "UNLICENSED"
+publish = false
+
+[workspace.dependencies]
+iaop_agent_bff-domain = { path = "crates/domain" }
+iaop_agent_bff-application = { path = "crates/application" }
+iaop_agent_bff-infrastructure = { path = "crates/infrastructure" }
+iaop_agent_bff-api = { path = "crates/api" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+tracing = "0.1"
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.8", features = [
+    "runtime-tokio-rustls",
+    "postgres",
+    "uuid",
+    "chrono",
+    "json",
+    "migrate",
+] }
+axum = "0.8"
+tower = "0.5"
+utoipa = { version = "5", features = ["uuid", "chrono"] }
+anyhow = "1"
+iaop-security = { git = "https://github.com/AGENTAPR/iaop-rust-common", branch = "main" }
+sha2 = "0.10"
+rand = "0.8"
+base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+async-trait = "0.1"
+
+[package]
+name = "iaop-agent-bff"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+iaop_agent_bff-domain.workspace = true
+iaop_agent_bff-application.workspace = true
+iaop_agent_bff-infrastructure.workspace = true
+iaop_agent_bff-api.workspace = true
+tokio.workspace = true
+axum.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+iaop-security.workspace = true
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

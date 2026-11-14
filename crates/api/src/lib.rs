@@ -1,0 +1,19 @@
+#![forbid(unsafe_code)]
+//! API layer (inbound adapter) for Agent Experience BFF.
+//!
+//! Axum router, HTTP handlers, DTOs, middleware, and error mapping.
+//! Depends on `application` and `infrastructure` for wiring types.
+
+pub mod auth_routes;
+pub mod dto;
+pub mod endpoints;
+pub mod envelope;
+pub mod error_mapping;
+pub mod middleware;
+pub mod openapi;
+pub mod principal;
+pub mod routes;
+pub mod state;
+
+pub use routes::build_router;
+pub use state::AppState;
