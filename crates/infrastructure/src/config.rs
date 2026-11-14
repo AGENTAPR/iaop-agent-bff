@@ -32,6 +32,8 @@ pub struct AppConfig {
     pub oidc_client_id: Option<String>,
     pub oidc_client_secret: Option<String>,
     pub oidc_redirect_uri: Option<String>,
+    /// Extra redirect URIs permitted via ?redirect_uri= on /auth/login.
+    pub oidc_redirect_uri_allowlist: Vec<String>,
     pub app_base_url: String,
     pub session_idle_timeout_secs: u64,
     pub session_absolute_timeout_secs: u64,
@@ -115,6 +117,15 @@ impl AppConfig {
             oidc_redirect_uri: std::env::var("OIDC_REDIRECT_URI")
                 .ok()
                 .filter(|v| !v.is_empty()),
+            oidc_redirect_uri_allowlist: std::env::var("OIDC_REDIRECT_URI_ALLOWLIST")
+                .ok()
+                .map(|v| {
+                    v.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
             app_base_url: env_or("APP_BASE_URL", "http://localhost:8080"),
             session_idle_timeout_secs: env_parse("SESSION_IDLE_TIMEOUT_SECS", 3600)?,
             session_absolute_timeout_secs: env_parse("SESSION_ABSOLUTE_TIMEOUT_SECS", 43200)?,

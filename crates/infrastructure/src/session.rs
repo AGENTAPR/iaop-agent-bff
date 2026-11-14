@@ -46,6 +46,9 @@ pub struct LoginTransaction {
     pub nonce: String,
     pub pkce_verifier: String,
     pub return_to: String,
+    /// Redirect URI used for this transaction (defaults to OidcConfig.redirect_uri).
+    /// Stored so token exchange uses the exact URI sent to the authorize endpoint.
+    pub redirect_uri: Option<String>,
     /// Browser binding: hash of a cookie set at login initiation.
     pub browser_binding: String,
     pub created_at: Instant,
@@ -235,6 +238,7 @@ mod tests {
             nonce: "n".into(),
             pkce_verifier: "v".into(),
             return_to: "/".into(),
+            redirect_uri: None,
             browser_binding: "b".into(),
             created_at: Instant::now(),
             ttl: Duration::from_secs(300),
