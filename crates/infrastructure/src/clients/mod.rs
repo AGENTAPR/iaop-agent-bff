@@ -1,7 +1,5 @@
-//! Typed HTTP clients for interacting with IAOP domain services.
-
+pub mod agency_client;
 pub mod agent_client;
 
-pub use agent_client::{
-    AgentClient, AgentClientError, AgentView, AppointmentView, IdentityLinkView,
-};
+pub use agency_client::AgencyClient;
+pub use agent_client::AgentClient;

@@ -1,29 +1,49 @@
-//! PostgreSQL-backed session store for production use.
+//! PostgreSQL-backed session store for production use with token encryption at rest.
 //!
 //! Implements `AsyncSessionStore` using SQLx + PgPool without compile-time query macros
 //! so that compilation does not require a live database or offline query data.
+//!
+//! Tokens (access_token, refresh_token) are encrypted at rest using authenticated
+//! AES-256-GCM via [`TokenCipher`] before persisting to `bff_sessions`.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 
-use crate::session::{AsyncSessionStore, LoginTransaction, Session};
+use crate::security::TokenCipher;
+use crate::session::{AsyncSessionStore, LoginTransaction, Session, SessionStore};
 
 /// PostgreSQL-backed session store.
 pub struct PgSessionStore {
     pool: PgPool,
+    cipher: Option<Arc<TokenCipher>>,
 }
 
 impl PgSessionStore {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: PgPool, encryption_key: Option<&str>) -> Self {
+        let cipher = encryption_key.map(|k| Arc::new(TokenCipher::new(k)));
+        Self { pool, cipher }
     }
 }
 
 #[async_trait::async_trait]
 impl AsyncSessionStore for PgSessionStore {
     async fn create_session(&self, s: Session) -> Result<(), String> {
+        let access_token = match &self.cipher {
+            Some(c) => c
+                .encrypt(&s.access_token)
+                .map_err(|e| format!("cipher error: {e}"))?,
+            None => s.access_token.clone(),
+        };
+
+        let refresh_token = match (&self.cipher, &s.refresh_token) {
+            (Some(c), Some(rt)) => Some(c.encrypt(rt).map_err(|e| format!("cipher error: {e}"))?),
+            (None, Some(rt)) => Some(rt.clone()),
+            _ => None,
+        };
+
         let sql = r#"
             INSERT INTO bff_sessions (
                 id, subject, display_name,
@@ -37,8 +57,8 @@ impl AsyncSessionStore for PgSessionStore {
             .bind(&s.id)
             .bind(&s.subject)
             .bind(&s.display_name)
-            .bind(&s.access_token)
-            .bind(&s.refresh_token)
+            .bind(&access_token)
+            .bind(&refresh_token)
             .bind(s.access_expires_at)
             .bind(&s.csrf_token)
             .bind(s.idle_timeout.as_secs() as i64)
@@ -92,12 +112,25 @@ impl AsyncSessionStore for PgSessionStore {
             .to_std()
             .unwrap_or(Duration::ZERO);
 
+        let raw_access: String = row.try_get("access_token").ok()?;
+        let access_token = match &self.cipher {
+            Some(c) => c.decrypt(&raw_access).unwrap_or(raw_access),
+            None => raw_access,
+        };
+
+        let raw_refresh: Option<String> = row.try_get("refresh_token").ok()?;
+        let refresh_token = match (&self.cipher, raw_refresh) {
+            (Some(c), Some(r)) => Some(c.decrypt(&r).unwrap_or(r)),
+            (None, Some(r)) => Some(r),
+            _ => None,
+        };
+
         Some(Session {
             id: row.try_get("id").ok()?,
             subject: row.try_get("subject").ok()?,
             display_name: row.try_get("display_name").ok()?,
-            access_token: row.try_get("access_token").ok()?,
-            refresh_token: row.try_get("refresh_token").ok()?,
+            access_token,
+            refresh_token,
             access_expires_at: row.try_get("access_expires_at").ok()?,
             created_at: now.checked_sub(age).unwrap_or(now),
             last_seen: now.checked_sub(idle).unwrap_or(now),
@@ -188,6 +221,45 @@ impl AsyncSessionStore for PgSessionStore {
             browser_binding: row.try_get("browser_binding").ok()?,
             created_at: Instant::now(),
             ttl: Duration::from_secs(1),
+        })
+    }
+}
+
+impl SessionStore for PgSessionStore {
+    fn create_session(&self, s: Session) -> Result<(), String> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(AsyncSessionStore::create_session(self, s))
+        })
+    }
+
+    fn get_session(&self, id: &str) -> Option<Session> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(AsyncSessionStore::get_session(self, id))
+        })
+    }
+
+    fn update_session(&self, s: &Session) -> Result<(), String> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(AsyncSessionStore::update_session(self, s))
+        })
+    }
+
+    fn delete_session(&self, id: &str) {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(AsyncSessionStore::delete_session(self, id))
+        })
+    }
+
+    fn put_login_txn(&self, tx: LoginTransaction) -> Result<(), String> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(AsyncSessionStore::put_login_txn(self, tx))
+        })
+    }
+
+    fn take_login_txn(&self, state: &str) -> Option<LoginTransaction> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(AsyncSessionStore::take_login_txn(self, state))
         })
     }
 }

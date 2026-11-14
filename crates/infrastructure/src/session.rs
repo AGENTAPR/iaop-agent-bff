@@ -146,6 +146,33 @@ impl SessionStore for InMemorySessionStore {
     }
 }
 
+#[async_trait::async_trait]
+impl AsyncSessionStore for InMemorySessionStore {
+    async fn create_session(&self, s: Session) -> Result<(), String> {
+        SessionStore::create_session(self, s)
+    }
+
+    async fn get_session(&self, id: &str) -> Option<Session> {
+        SessionStore::get_session(self, id)
+    }
+
+    async fn update_session(&self, s: &Session) -> Result<(), String> {
+        SessionStore::update_session(self, s)
+    }
+
+    async fn delete_session(&self, id: &str) {
+        SessionStore::delete_session(self, id)
+    }
+
+    async fn put_login_txn(&self, tx: LoginTransaction) -> Result<(), String> {
+        SessionStore::put_login_txn(self, tx)
+    }
+
+    async fn take_login_txn(&self, state: &str) -> Option<LoginTransaction> {
+        SessionStore::take_login_txn(self, state)
+    }
+}
+
 /// Generates a new opaque session ID.
 pub fn new_session_id() -> String {
     Uuid::now_v7().to_string()
@@ -187,8 +214,8 @@ mod tests {
             created_at: Instant::now(),
             ttl: Duration::from_secs(300),
         };
-        store.put_login_txn(tx).unwrap();
-        assert!(store.take_login_txn("s1").is_some());
-        assert!(store.take_login_txn("s1").is_none()); // replay rejected
+        SessionStore::put_login_txn(&store, tx).unwrap();
+        assert!(SessionStore::take_login_txn(&store, "s1").is_some());
+        assert!(SessionStore::take_login_txn(&store, "s1").is_none()); // replay rejected
     }
 }

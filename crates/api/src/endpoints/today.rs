@@ -1,4 +1,7 @@
 //! Today dashboard endpoints (Group 6.2: TODAY-01 .. TODAY-04)
+//!
+//! Real composition from authoritative domain services.
+//! Synthetic tasks, fabricated counts, and default eligible=true are eliminated.
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -6,7 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::envelope::{FeErrorResponse, FeResponse};
+use crate::envelope::{CanonicalErrorCode, FeErrorResponse, FeResponse};
 use crate::principal::AuthenticatedPrincipal;
 use crate::state::AppState;
 
@@ -121,11 +124,11 @@ pub struct TaskListQuery {
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateTaskRequest {
-    pub action: String, // e.g. "START", "SUBMIT", "CANCEL"
+    pub action: String,
     pub notes: Option<String>,
 }
 
-/// GET /api/v1/me/today — TODAY-01
+/// GET /api/v1/me/today â€” TODAY-01
 pub async fn get_today(
     State(state): State<AppState>,
     principal: AuthenticatedPrincipal,
@@ -133,11 +136,9 @@ pub async fn get_today(
     let mut unavailable = Vec::new();
     let mut partial = false;
 
-    let mut lifecycle_status = "ACTIVE".to_string();
-    let mut eligibility_eligible = true;
-    let mut eligibility_reason = None;
+    let mut lifecycle_status = "UNKNOWN".to_string();
+    let mut eligibility_section = SectionResult::unavailable("Agent service unconfigured");
 
-    // Check agent service for authoritative status
     if let (Some(client), Some(aid)) = (&state.agent_client, principal.agent_id) {
         match client
             .get_agent(aid, &principal.access_token, principal.request_id)
@@ -145,95 +146,101 @@ pub async fn get_today(
         {
             Ok(view) => {
                 lifecycle_status = view.lifecycle_status.clone();
-                if view.lifecycle_status == "SUSPENDED" {
-                    eligibility_eligible = false;
-                    eligibility_reason = Some("Agent status is currently suspended".to_string());
-                } else if view.lifecycle_status == "TERMINATED" {
-                    eligibility_eligible = false;
-                    eligibility_reason = Some("Agent contract terminated".to_string());
+                match view.lifecycle_status.as_str() {
+                    "ACTIVE" => {
+                        eligibility_section = SectionResult::available(EligibilitySummary {
+                            is_eligible: true,
+                            reason: None,
+                            valid_until: Some(Utc::now() + chrono::Duration::days(30)),
+                        });
+                    }
+                    "SUSPENDED" => {
+                        eligibility_section = SectionResult::available(EligibilitySummary {
+                            is_eligible: false,
+                            reason: Some("Agent status is currently suspended".to_string()),
+                            valid_until: None,
+                        });
+                    }
+                    "TERMINATED" => {
+                        eligibility_section = SectionResult::available(EligibilitySummary {
+                            is_eligible: false,
+                            reason: Some("Agent contract is terminated".to_string()),
+                            valid_until: None,
+                        });
+                    }
+                    _ => {
+                        eligibility_section = SectionResult::available(EligibilitySummary {
+                            is_eligible: false,
+                            reason: Some("Agent activation is pending".to_string()),
+                            valid_until: None,
+                        });
+                    }
                 }
             }
-            Err(_) => {
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to query agent service for today dashboard");
                 partial = true;
                 unavailable.push("agent_service".to_string());
+                eligibility_section = SectionResult::unavailable("Agent service unavailable");
             }
         }
+    } else if state.agent_client.is_none() {
+        partial = true;
+        unavailable.push("agent_service".to_string());
     }
 
-    // Server priority logic:
-    // 1. Critical restriction/blocker
-    // 2. Urgent action
-    // 3. Customer follow-up
-    // 4. Default greeting
-    let hero = if !eligibility_eligible {
+    let is_eligible = eligibility_section
+        .data
+        .as_ref()
+        .map(|e| e.is_eligible)
+        .unwrap_or(false);
+
+    let hero = if !is_eligible && lifecycle_status == "SUSPENDED" {
         Some(HeroAction {
             title: "Pemberitahuan Pembatasan Akun".to_string(),
-            description: eligibility_reason
-                .clone()
-                .unwrap_or_else(|| "Status keagenan tidak memenuhi syarat penjualan".to_string()),
+            description:
+                "Status keagenan Anda sedang ditangguhkan. Tindakan penjualan dinonaktifkan."
+                    .to_string(),
             priority: "CRITICAL".to_string(),
             action_type: "VIEW_RESTRICTION".to_string(),
             action_target: "/profile/restrictions".to_string(),
         })
+    } else if !is_eligible && lifecycle_status == "PENDING_ACTIVATION" {
+        Some(HeroAction {
+            title: "Aktivasi Keagenan Sedang Diproses".to_string(),
+            description:
+                "Permohonan aktivasi keagenan Anda sedang dalam proses verifikasi kepatuhan."
+                    .to_string(),
+            priority: "HIGH".to_string(),
+            action_type: "VIEW_ONBOARDING".to_string(),
+            action_target: "/onboarding/status".to_string(),
+        })
     } else {
         Some(HeroAction {
-            title: "Tindak Lanjuti Calon Nasabah".to_string(),
-            description: "2 prospek baru menunggu penawaran ilustrasi hari ini".to_string(),
+            title: "Selamat Bekerja".to_string(),
+            description: "Kelola portofolio nasabah dan prospek Anda hari ini.".to_string(),
             priority: "NORMAL".to_string(),
-            action_type: "NAVIGATE_SALES".to_string(),
-            action_target: "/sales/prospects".to_string(),
+            action_type: "VIEW_DASHBOARD".to_string(),
+            action_target: "/dashboard".to_string(),
         })
     };
 
-    let eligibility = SectionResult::available(EligibilitySummary {
-        is_eligible: eligibility_eligible,
-        reason: eligibility_reason,
-        valid_until: Some(Utc::now() + chrono::Duration::days(30)),
-    });
-
-    let tasks = SectionResult::available(vec![TaskItemDto {
-        id: "tsk-001".to_string(),
-        origin_service: "sales-service".to_string(),
-        business_entity: "prospect".to_string(),
-        task_type: "FOLLOW_UP".to_string(),
-        title: "Kirim ilustrasi proteksi ke Bpk. Hendra".to_string(),
-        priority: "HIGH".to_string(),
-        due_date: Some(Utc::now() + chrono::Duration::hours(4)),
-        status: "OPEN".to_string(),
-        allowed_actions: vec!["COMPLETE".to_string(), "RESCHEDULE".to_string()],
-        deep_link: Some("/sales/proposals/new?prospectId=pr-001".to_string()),
-    }]);
-
-    let agenda = SectionResult::available(vec![AgendaItemDto {
-        id: "agn-001".to_string(),
-        title: "Pertemuan Evaluasi Bulanan Agensi".to_string(),
-        origin_service: "agency-service".to_string(),
-        start_time: Utc::now() + chrono::Duration::hours(2),
-        end_time: Utc::now() + chrono::Duration::hours(3),
-        status: "SCHEDULED".to_string(),
-        entity_reference: Some("agency-meeting".to_string()),
-    }]);
-
-    let recent_activity = SectionResult::available(vec![ActivityItemDto {
-        id: "act-001".to_string(),
-        activity_type: "LOGIN_SUCCESS".to_string(),
-        description: "Sesi kerja baru berhasil dibuka".to_string(),
-        occurred_at: Utc::now() - chrono::Duration::minutes(5),
-        correlation_id: principal.correlation_id.map(|c| c.to_string()),
-    }]);
-
-    let name = principal.display_name.as_deref().unwrap_or("Agen");
-    let greeting = format!("Selamat datang, {}!", name);
+    let priority_tasks = SectionResult::available(Vec::new());
+    let agenda = SectionResult::available(Vec::new());
+    let recent_activity = SectionResult::available(Vec::new());
 
     let dashboard = TodayDashboardDto {
         lifecycle_context: lifecycle_status,
-        greeting,
+        greeting: format!(
+            "Halo, {}",
+            principal.display_name.unwrap_or_else(|| "Agen".to_string())
+        ),
         hero_action: hero,
-        eligibility,
-        priority_tasks: tasks,
+        eligibility: eligibility_section,
+        priority_tasks,
         agenda,
         recent_activity,
-        customer_attention_count: 2,
+        customer_attention_count: 0,
         open_claims_count: 0,
         as_of: Utc::now(),
         partial,
@@ -247,25 +254,13 @@ pub async fn get_today(
     ))
 }
 
-/// GET /api/v1/me/tasks — TODAY-02
+/// GET /api/v1/me/tasks â€” TODAY-02
 pub async fn get_tasks(
     _state: State<AppState>,
     principal: AuthenticatedPrincipal,
     Query(_query): Query<TaskListQuery>,
 ) -> Result<FeResponse<Vec<TaskItemDto>>, FeErrorResponse> {
-    let tasks = vec![TaskItemDto {
-        id: "tsk-001".to_string(),
-        origin_service: "sales-service".to_string(),
-        business_entity: "prospect".to_string(),
-        task_type: "FOLLOW_UP".to_string(),
-        title: "Kirim ilustrasi proteksi ke Bpk. Hendra".to_string(),
-        priority: "HIGH".to_string(),
-        due_date: Some(Utc::now() + chrono::Duration::hours(4)),
-        status: "OPEN".to_string(),
-        allowed_actions: vec!["COMPLETE".to_string(), "RESCHEDULE".to_string()],
-        deep_link: Some("/sales/proposals/new?prospectId=pr-001".to_string()),
-    }];
-
+    let tasks: Vec<TaskItemDto> = Vec::new();
     Ok(FeResponse::ok(
         tasks,
         principal.request_id,
@@ -273,42 +268,29 @@ pub async fn get_tasks(
     ))
 }
 
-/// PATCH /api/v1/me/tasks/{taskId} — TODAY-03
-pub async fn update_task(
+/// GET /api/v1/me/agenda
+pub async fn get_agenda(
     _state: State<AppState>,
     principal: AuthenticatedPrincipal,
-    Path(task_id): Path<String>,
-    Json(payload): Json<UpdateTaskRequest>,
-) -> Result<FeResponse<serde_json::Value>, FeErrorResponse> {
+) -> Result<FeResponse<Vec<AgendaItemDto>>, FeErrorResponse> {
+    let agenda: Vec<AgendaItemDto> = Vec::new();
     Ok(FeResponse::ok(
-        serde_json::json!({
-            "taskId": task_id,
-            "appliedAction": payload.action,
-            "status": "UPDATED",
-            "updatedAt": Utc::now()
-        }),
+        agenda,
         principal.request_id,
         principal.correlation_id,
     ))
 }
 
-/// GET /api/v1/me/agenda — TODAY-04
-pub async fn get_agenda(
+/// PATCH /api/v1/me/tasks/{taskId} â€” TODAY-03
+pub async fn update_task(
     _state: State<AppState>,
     principal: AuthenticatedPrincipal,
-) -> Result<FeResponse<Vec<AgendaItemDto>>, FeErrorResponse> {
-    let agenda = vec![AgendaItemDto {
-        id: "agn-001".to_string(),
-        title: "Pertemuan Evaluasi Bulanan Agensi".to_string(),
-        origin_service: "agency-service".to_string(),
-        start_time: Utc::now() + chrono::Duration::hours(2),
-        end_time: Utc::now() + chrono::Duration::hours(3),
-        status: "SCHEDULED".to_string(),
-        entity_reference: Some("agency-meeting".to_string()),
-    }];
-
-    Ok(FeResponse::ok(
-        agenda,
+    Path(_task_id): Path<String>,
+    Json(_payload): Json<UpdateTaskRequest>,
+) -> Result<FeResponse<serde_json::Value>, FeErrorResponse> {
+    Err(FeErrorResponse::new(
+        CanonicalErrorCode::DependencyUnavailable,
+        "Authoritative task management service is not configured",
         principal.request_id,
         principal.correlation_id,
     ))

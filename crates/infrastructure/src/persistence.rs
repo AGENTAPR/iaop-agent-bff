@@ -4,7 +4,7 @@
 //! This service owns its database exclusively. No cross-service queries,
 //! joins, or foreign keys are permitted.
 
-use sqlx::PgPool;
+pub use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
 /// Establish a connection pool. Returns `None`-safe callers should check

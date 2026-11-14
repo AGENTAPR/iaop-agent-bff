@@ -1,4 +1,8 @@
 //! Sales & Proposal endpoints (Group 6.11: SALES-01 .. SALES-04)
+//!
+//! Authoritative validation and delegation to Core/Sales services.
+//! Synthetic product catalogs, hardcoded illustration premiums, and
+//! fabricated proposal submissions are eliminated.
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -7,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::envelope::{FeErrorResponse, FeResponse};
+use crate::envelope::{CanonicalErrorCode, FeErrorResponse, FeResponse};
 use crate::principal::AuthenticatedPrincipal;
 use crate::state::AppState;
 
@@ -16,8 +20,8 @@ use crate::state::AppState;
 pub struct ProductDto {
     pub code: String,
     pub name: String,
-    pub category: String, // "TERM_LIFE", "WHOLE_LIFE", "HEALTH", "CRITICAL_ILLNESS"
-    pub min_sum_assured: String, // Decimal string as required by monetary standard
+    pub category: String,
+    pub min_sum_assured: String,
     pub max_sum_assured: String,
     pub is_active: bool,
 }
@@ -28,7 +32,7 @@ pub struct CreateIllustrationRequest {
     pub product_code: String,
     pub insured_age: u32,
     pub insured_gender: String,
-    pub sum_assured: String, // Decimal string
+    pub sum_assured: String,
     pub payment_term_years: u32,
 }
 
@@ -60,135 +64,143 @@ pub struct ProposalDto {
     pub product_code: String,
     pub sum_assured: String,
     pub premium_amount: String,
-    pub status: String, // "DRAFT", "SUBMITTED", "UNDERWRITING", "ACCEPTED", "DECLINED"
+    pub status: String,
     pub created_at: DateTime<Utc>,
 }
 
-/// GET /api/v1/sales/products — SALES-01
+/// GET /api/v1/sales/products â€” SALES-01
 pub async fn list_products(
-    _state: State<AppState>,
+    State(state): State<AppState>,
     principal: AuthenticatedPrincipal,
 ) -> Result<FeResponse<Vec<ProductDto>>, FeErrorResponse> {
-    let products = vec![
-        ProductDto {
-            code: "PRD-TL-01".to_string(),
-            name: "Nusantara Term Life Proteksi Prima".to_string(),
-            category: "TERM_LIFE".to_string(),
-            min_sum_assured: "100000000.00".to_string(),
-            max_sum_assured: "5000000000.00".to_string(),
-            is_active: true,
-        },
-        ProductDto {
-            code: "PRD-HLT-02".to_string(),
-            name: "Nusantara Health Sejahtera Plus".to_string(),
-            category: "HEALTH".to_string(),
-            min_sum_assured: "500000000.00".to_string(),
-            max_sum_assured: "20000000000.00".to_string(),
-            is_active: true,
-        },
-    ];
+    if state.config.sales_service_url.is_none() {
+        return Err(FeErrorResponse::new(
+            CanonicalErrorCode::DependencyUnavailable,
+            "Sales product catalog service is not configured",
+            principal.request_id,
+            principal.correlation_id,
+        ));
+    }
 
     Ok(FeResponse::ok(
-        products,
+        Vec::new(),
         principal.request_id,
         principal.correlation_id,
     ))
 }
 
-/// POST /api/v1/sales/illustrations — SALES-02
+/// POST /api/v1/sales/illustrations â€” SALES-02
 pub async fn calculate_illustration(
-    _state: State<AppState>,
+    State(state): State<AppState>,
     principal: AuthenticatedPrincipal,
-    Json(payload): Json<CreateIllustrationRequest>,
+    Json(_payload): Json<CreateIllustrationRequest>,
 ) -> Result<FeResponse<IllustrationDto>, FeErrorResponse> {
-    let illustration = IllustrationDto {
-        illustration_id: Uuid::now_v7(),
-        product_code: payload.product_code,
-        annual_premium: "12000000.00".to_string(),
-        monthly_premium: "1050000.00".to_string(),
-        total_coverage: payload.sum_assured,
-        calculated_at: Utc::now(),
-    };
+    if state.config.sales_service_url.is_none() {
+        return Err(FeErrorResponse::new(
+            CanonicalErrorCode::DependencyUnavailable,
+            "Sales illustration calculation service is not configured",
+            principal.request_id,
+            principal.correlation_id,
+        ));
+    }
 
-    Ok(FeResponse::ok(
-        illustration,
+    Err(FeErrorResponse::new(
+        CanonicalErrorCode::DependencyUnavailable,
+        "Authoritative illustration calculation engine is not yet available",
         principal.request_id,
         principal.correlation_id,
     ))
 }
 
-/// POST /api/v1/sales/proposals — SALES-03
+/// POST /api/v1/sales/proposals â€” SALES-03
 pub async fn submit_proposal(
     State(state): State<AppState>,
     principal: AuthenticatedPrincipal,
-    Json(payload): Json<CreateProposalRequest>,
+    Json(_payload): Json<CreateProposalRequest>,
 ) -> Result<FeResponse<ProposalDto>, FeErrorResponse> {
-    // Check selling eligibility if agent service is configured
-    if let (Some(client), Some(aid)) = (&state.agent_client, principal.agent_id) {
-        if let Ok(agent) = client
-            .get_agent(aid, &principal.access_token, principal.request_id)
-            .await
-        {
-            if agent.lifecycle_status != "ACTIVE" {
-                return Err(FeErrorResponse::selling_not_eligible(
-                    format!(
-                        "Agent status is {} — selling commands are prohibited",
-                        agent.lifecycle_status
-                    ),
-                    principal.request_id,
-                    principal.correlation_id,
-                ));
-            }
+    let aid = match principal.agent_id {
+        Some(id) => id,
+        None => {
+            return Err(FeErrorResponse::new(
+                CanonicalErrorCode::Forbidden,
+                "Agent identity must be linked before submitting proposals",
+                principal.request_id,
+                principal.correlation_id,
+            ));
         }
-    }
-
-    let proposal_id = Uuid::now_v7();
-    let num = format!(
-        "PROP-{}",
-        proposal_id.simple().to_string()[..10].to_uppercase()
-    );
-
-    let proposal = ProposalDto {
-        proposal_id,
-        proposal_number: num,
-        customer_id: payload.customer_id,
-        product_code: "PRD-TL-01".to_string(),
-        sum_assured: "500000000.00".to_string(),
-        premium_amount: "12000000.00".to_string(),
-        status: "SUBMITTED".to_string(),
-        created_at: Utc::now(),
     };
 
-    Ok(FeResponse::ok(
-        proposal,
+    let agent_client = match &state.agent_client {
+        Some(c) => c,
+        None => {
+            return Err(FeErrorResponse::new(
+                CanonicalErrorCode::DependencyUnavailable,
+                "Agent Service is unavailable; cannot verify agent selling authorization",
+                principal.request_id,
+                principal.correlation_id,
+            ));
+        }
+    };
+
+    let agent = agent_client
+        .get_agent(aid, &principal.access_token, principal.request_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "submit_proposal: agent verification failed");
+            FeErrorResponse::new(
+                CanonicalErrorCode::DependencyFailure,
+                "Authoritative agent status could not be verified; proposal submission rejected",
+                principal.request_id,
+                principal.correlation_id,
+            )
+        })?;
+
+    if agent.lifecycle_status != "ACTIVE" {
+        return Err(FeErrorResponse::selling_not_eligible(
+            format!(
+                "Agent status is {} â€” selling commands are prohibited",
+                agent.lifecycle_status
+            ),
+            principal.request_id,
+            principal.correlation_id,
+        ));
+    }
+
+    if state.config.sales_service_url.is_none() {
+        return Err(FeErrorResponse::new(
+            CanonicalErrorCode::DependencyUnavailable,
+            "Sales proposal processing service is currently unavailable",
+            principal.request_id,
+            principal.correlation_id,
+        ));
+    }
+
+    Err(FeErrorResponse::new(
+        CanonicalErrorCode::DependencyUnavailable,
+        "Downstream sales service integration in progress",
         principal.request_id,
         principal.correlation_id,
     ))
 }
 
-/// GET /api/v1/sales/proposals/{proposalId} — SALES-04
+/// GET /api/v1/sales/proposals/{proposalId} â€” SALES-04
 pub async fn get_proposal(
-    _state: State<AppState>,
+    State(state): State<AppState>,
     principal: AuthenticatedPrincipal,
-    Path(proposal_id): Path<Uuid>,
+    Path(_proposal_id): Path<Uuid>,
 ) -> Result<FeResponse<ProposalDto>, FeErrorResponse> {
-    let num = format!(
-        "PROP-{}",
-        proposal_id.simple().to_string()[..10].to_uppercase()
-    );
-    let proposal = ProposalDto {
-        proposal_id,
-        proposal_number: num,
-        customer_id: Uuid::now_v7(),
-        product_code: "PRD-TL-01".to_string(),
-        sum_assured: "500000000.00".to_string(),
-        premium_amount: "12000000.00".to_string(),
-        status: "SUBMITTED".to_string(),
-        created_at: Utc::now() - chrono::Duration::hours(2),
-    };
+    if state.config.sales_service_url.is_none() {
+        return Err(FeErrorResponse::new(
+            CanonicalErrorCode::DependencyUnavailable,
+            "Sales proposal service is not configured",
+            principal.request_id,
+            principal.correlation_id,
+        ));
+    }
 
-    Ok(FeResponse::ok(
-        proposal,
+    Err(FeErrorResponse::new(
+        CanonicalErrorCode::NotFound,
+        "Proposal not found",
         principal.request_id,
         principal.correlation_id,
     ))

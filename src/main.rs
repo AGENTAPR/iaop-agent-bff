@@ -1,7 +1,7 @@
 //! Composition root for Agent Experience BFF.
 //!
-//! Wires configuration, persistence, and the HTTP router, then serves with
-//! graceful shutdown on SIGINT/SIGTERM.
+//! Wires configuration, persistence, downstream clients, and the HTTP router,
+//! then serves with graceful shutdown on SIGINT/SIGTERM.
 
 use std::sync::Arc;
 
@@ -40,9 +40,14 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let auth = build_auth_context(&config);
+    let auth = build_auth_context(&config, &db);
     let agent_client = config.agent_service_url.as_ref().map(|url| {
         Arc::new(iaop_agent_bff_infrastructure::clients::AgentClient::new(
+            url.clone(),
+        ))
+    });
+    let agency_client = config.agency_service_url.as_ref().map(|url| {
+        Arc::new(iaop_agent_bff_infrastructure::clients::AgencyClient::new(
             url.clone(),
         ))
     });
@@ -52,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
         db,
         auth,
         agent_client,
+        agency_client,
     };
     let app = build_router(state);
 
@@ -71,9 +77,11 @@ async fn main() -> anyhow::Result<()> {
 
 fn build_auth_context(
     config: &AppConfig,
+    db: &Option<iaop_agent_bff_infrastructure::persistence::PgPool>,
 ) -> Option<std::sync::Arc<iaop_agent_bff_api::auth_routes::AuthContext>> {
     use iaop_agent_bff_api::auth_routes::AuthContext;
     use iaop_agent_bff_infrastructure::oidc::OidcConfig;
+    use iaop_agent_bff_infrastructure::pg_session::PgSessionStore;
     use iaop_agent_bff_infrastructure::session::InMemorySessionStore;
     use iaop_security::jwks::{JwtValidator, RemoteJwksProvider};
 
@@ -95,9 +103,24 @@ fn build_auth_context(
     };
     let id_validator =
         JwtValidator::new(RemoteJwksProvider::new(oidc.jwks_uri()), issuer, client_id);
+
+    let store: Arc<dyn iaop_agent_bff_infrastructure::session::SessionStore> = match db {
+        Some(pool) => {
+            tracing::info!("wiring PostgreSQL session store with token encryption");
+            Arc::new(PgSessionStore::new(
+                pool.clone(),
+                config.sessions_encryption_key.as_deref(),
+            ))
+        }
+        None => {
+            tracing::warn!("running with InMemorySessionStore (DEV ONLY)");
+            Arc::new(InMemorySessionStore::new())
+        }
+    };
+
     Some(std::sync::Arc::new(AuthContext {
         oidc,
-        store: Arc::new(InMemorySessionStore::new()),
+        store,
         id_validator,
     }))
 }

@@ -23,6 +23,7 @@ fn test_state() -> AppState {
         db: None,
         auth: None,
         agent_client: None,
+        agency_client: None,
     }
 }
 
@@ -75,6 +76,7 @@ fn test_auth_state() -> (AppState, String, String) {
         db: None,
         auth,
         agent_client: None,
+        agency_client: None,
     };
 
     (state, session_id, csrf_token)
@@ -238,13 +240,13 @@ async fn today_dashboard_returns_sections_and_hero_action() {
 
     assert!(json["data"]["greeting"].is_string());
     assert!(json["data"]["heroAction"].is_object());
-    assert_eq!(json["data"]["eligibility"]["status"], "AVAILABLE");
     assert_eq!(json["data"]["priorityTasks"]["status"], "AVAILABLE");
+    assert_eq!(json["data"]["agenda"]["status"], "AVAILABLE");
     assert_eq!(json["meta"]["schemaVersion"], "1.0");
 }
 
 #[tokio::test]
-async fn sales_products_returns_monetary_decimal_strings() {
+async fn sales_products_unconfigured_returns_503() {
     let (state, session_id, _) = test_auth_state();
     let app = build_router(state);
 
@@ -259,18 +261,13 @@ async fn sales_products_returns_monetary_decimal_strings() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let json = response_json(response).await;
-
-    let products = json["data"].as_array().unwrap();
-    assert!(!products.is_empty());
-    // Rule: Never use floating point for monetary amounts — must be string decimal
-    assert!(products[0]["minSumAssured"].is_string());
-    assert!(products[0]["maxSumAssured"].is_string());
+    assert_eq!(json["error"]["code"], "DEPENDENCY_UNAVAILABLE");
 }
 
 #[tokio::test]
-async fn calculate_illustration_endpoint_works() {
+async fn calculate_illustration_unconfigured_returns_503() {
     let (state, session_id, csrf_token) = test_auth_state();
     let app = build_router(state);
 
@@ -296,9 +293,7 @@ async fn calculate_illustration_endpoint_works() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let json = response_json(response).await;
-
-    assert_eq!(json["data"]["productCode"], "PRD-TL-01");
-    assert!(json["data"]["annualPremium"].is_string());
+    assert_eq!(json["error"]["code"], "DEPENDENCY_UNAVAILABLE");
 }

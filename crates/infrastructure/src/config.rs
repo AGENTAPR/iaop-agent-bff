@@ -10,6 +10,8 @@ pub enum ConfigError {
     MissingVar(&'static str),
     #[error("invalid value for {0}: {1}")]
     InvalidValue(&'static str, String),
+    #[error("unsafe configuration: {0}")]
+    UnsafeConfig(String),
 }
 
 /// Service configuration. Secrets (e.g. DATABASE_URL) are never logged;
@@ -33,6 +35,7 @@ pub struct AppConfig {
     pub app_base_url: String,
     pub session_idle_timeout_secs: u64,
     pub session_absolute_timeout_secs: u64,
+    pub sessions_encryption_key: Option<String>,
     pub oidc_allowed_return_paths: Vec<String>,
     pub cors_allowed_origins: Vec<String>,
     pub agent_service_url: Option<String>,
@@ -67,12 +70,32 @@ impl AppConfig {
             .filter(|s| !s.is_empty())
             .collect();
 
+        let environment = env_or("ENVIRONMENT", "local");
+        let is_production = environment.eq_ignore_ascii_case("production");
+        let database_url = std::env::var("DATABASE_URL").ok().filter(|s| !s.is_empty());
+        let sessions_encryption_key = std::env::var("SESSIONS_ENCRYPTION_KEY")
+            .ok()
+            .filter(|v| !v.is_empty());
+
+        if is_production {
+            if database_url.is_none() {
+                return Err(ConfigError::UnsafeConfig(
+                    "DATABASE_URL must be configured when ENVIRONMENT=production".into(),
+                ));
+            }
+            if sessions_encryption_key.is_none() {
+                return Err(ConfigError::UnsafeConfig(
+                    "SESSIONS_ENCRYPTION_KEY must be configured when ENVIRONMENT=production".into(),
+                ));
+            }
+        }
+
         Ok(Self {
             service_name: env_or("SERVICE_NAME", "iaop-agent-bff"),
             service_version: env_or("SERVICE_VERSION", env!("CARGO_PKG_VERSION")),
-            environment: env_or("ENVIRONMENT", "local"),
+            environment,
             bind_addr: env_or("BIND_ADDR", "0.0.0.0:8080"),
-            database_url: std::env::var("DATABASE_URL").ok().filter(|s| !s.is_empty()),
+            database_url,
             database_max_connections: env_parse("DATABASE_MAX_CONNECTIONS", 10)?,
             request_timeout: Duration::from_secs(env_parse("REQUEST_TIMEOUT_SECS", 30)?),
             oidc_issuer: std::env::var("OIDC_ISSUER").ok().filter(|v| !v.is_empty()),
@@ -88,6 +111,7 @@ impl AppConfig {
             app_base_url: env_or("APP_BASE_URL", "http://localhost:8080"),
             session_idle_timeout_secs: env_parse("SESSION_IDLE_TIMEOUT_SECS", 3600)?,
             session_absolute_timeout_secs: env_parse("SESSION_ABSOLUTE_TIMEOUT_SECS", 43200)?,
+            sessions_encryption_key,
             oidc_allowed_return_paths: return_paths,
             cors_allowed_origins: cors_origins,
             agent_service_url: std::env::var("AGENT_SERVICE_URL")

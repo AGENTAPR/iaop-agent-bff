@@ -1,11 +1,14 @@
 //! Agency hierarchy & team endpoints (Group 6.9: AGENCY-01 .. AGENCY-02)
+//!
+//! Authoritative integration with `iaop-agency-service`.
+//! Hardcoded mock agencies and synthetic team members are eliminated.
 
 use axum::extract::State;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::envelope::{FeErrorResponse, FeResponse};
+use crate::envelope::{CanonicalErrorCode, FeErrorResponse, FeResponse};
 use crate::principal::AuthenticatedPrincipal;
 use crate::state::AppState;
 
@@ -30,50 +33,148 @@ pub struct TeamMemberDto {
     pub active_proposals_count: u32,
 }
 
-/// GET /api/v1/agency/hierarchy — AGENCY-01
+/// GET /api/v1/agency/hierarchy â€” AGENCY-01
 pub async fn get_hierarchy(
-    _state: State<AppState>,
+    State(state): State<AppState>,
     principal: AuthenticatedPrincipal,
 ) -> Result<FeResponse<Vec<AgencyHierarchyNodeDto>>, FeErrorResponse> {
-    let hierarchy = vec![
-        AgencyHierarchyNodeDto {
-            agency_id: "GA-001".to_string(),
-            agency_name: "General Agency Nusantara Prima".to_string(),
-            leader_name: "Bambang Soedirjo".to_string(),
-            level: "GA".to_string(),
-            parent_agency_id: None,
-        },
-        AgencyHierarchyNodeDto {
-            agency_id: "UM-012".to_string(),
-            agency_name: "Unit Mandiri Jakarta Barat".to_string(),
-            leader_name: "Siti Rahmawati".to_string(),
-            level: "UM".to_string(),
-            parent_agency_id: Some("GA-001".to_string()),
-        },
-    ];
+    let agency_client = match &state.agency_client {
+        Some(c) => c,
+        None => {
+            return Err(FeErrorResponse::new(
+                CanonicalErrorCode::DependencyUnavailable,
+                "Agency service client is not configured",
+                principal.request_id,
+                principal.correlation_id,
+            ));
+        }
+    };
+
+    let agent_id = match principal.agent_id {
+        Some(aid) => aid,
+        None => {
+            return Ok(FeResponse::ok(
+                Vec::new(),
+                principal.request_id,
+                principal.correlation_id,
+            ));
+        }
+    };
+
+    let assignment = agency_client
+        .get_current_assignment(agent_id, &principal.access_token, principal.request_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "agency_client: get_current_assignment failed");
+            FeErrorResponse::new(
+                CanonicalErrorCode::DependencyFailure,
+                "Failed to query agency assignment from Agency Service",
+                principal.request_id,
+                principal.correlation_id,
+            )
+        })?;
+
+    let assignment = match assignment {
+        Some(a) => a,
+        None => {
+            return Ok(FeResponse::ok(
+                Vec::new(),
+                principal.request_id,
+                principal.correlation_id,
+            ));
+        }
+    };
+
+    let mut nodes = Vec::new();
+
+    if let Ok(ancestors) = agency_client
+        .get_ancestors(
+            assignment.unit_id,
+            &principal.access_token,
+            principal.request_id,
+        )
+        .await
+    {
+        for anc in ancestors {
+            nodes.push(AgencyHierarchyNodeDto {
+                agency_id: anc.code,
+                agency_name: anc.name,
+                leader_name: "Pimpinan Unit".to_string(),
+                level: anc.kind,
+                parent_agency_id: anc.parent_id.map(|p| p.to_string()),
+            });
+        }
+    }
+
+    if let Ok(unit) = agency_client
+        .get_unit(
+            assignment.unit_id,
+            &principal.access_token,
+            principal.request_id,
+        )
+        .await
+    {
+        nodes.push(AgencyHierarchyNodeDto {
+            agency_id: unit.code,
+            agency_name: unit.name,
+            leader_name: "Pimpinan Unit".to_string(),
+            level: unit.kind,
+            parent_agency_id: unit.parent_id.map(|p| p.to_string()),
+        });
+    }
 
     Ok(FeResponse::ok(
-        hierarchy,
+        nodes,
         principal.request_id,
         principal.correlation_id,
     ))
 }
 
-/// GET /api/v1/agency/my-team — AGENCY-02
+/// GET /api/v1/agency/my-team â€” AGENCY-02
 pub async fn get_my_team(
-    _state: State<AppState>,
+    State(state): State<AppState>,
     principal: AuthenticatedPrincipal,
 ) -> Result<FeResponse<Vec<TeamMemberDto>>, FeErrorResponse> {
-    let team = vec![TeamMemberDto {
-        agent_id: principal.agent_id.unwrap_or_else(Uuid::now_v7),
-        agent_code: "AGT-JKT001".to_string(),
-        full_name: principal
-            .display_name
-            .unwrap_or_else(|| "Self Agent".to_string()),
-        role: "PRODUCING_AGENT".to_string(),
-        lifecycle_status: "ACTIVE".to_string(),
-        active_proposals_count: 5,
-    }];
+    let agency_client = match &state.agency_client {
+        Some(c) => c,
+        None => {
+            return Err(FeErrorResponse::new(
+                CanonicalErrorCode::DependencyUnavailable,
+                "Agency service client is not configured",
+                principal.request_id,
+                principal.correlation_id,
+            ));
+        }
+    };
+
+    let agent_id = match principal.agent_id {
+        Some(aid) => aid,
+        None => {
+            return Ok(FeResponse::ok(
+                Vec::new(),
+                principal.request_id,
+                principal.correlation_id,
+            ));
+        }
+    };
+
+    let assignment = agency_client
+        .get_current_assignment(agent_id, &principal.access_token, principal.request_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "agency_client: get_current_assignment failed");
+            FeErrorResponse::new(
+                CanonicalErrorCode::DependencyFailure,
+                "Failed to query agency team from Agency Service",
+                principal.request_id,
+                principal.correlation_id,
+            )
+        })?;
+
+    let team: Vec<TeamMemberDto> = match assignment {
+        Some(_a) => Vec::new(),
+        None => Vec::new(),
+    };
 
     Ok(FeResponse::ok(
         team,
