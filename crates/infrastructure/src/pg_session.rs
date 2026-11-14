@@ -204,6 +204,58 @@ impl SessionStore for PgSessionStore {
         Ok(())
     }
 
+    async fn update_tokens(
+        &self,
+        session_id: &str,
+        access_token: &str,
+        refresh_token: Option<&str>,
+        access_expires_at: DateTime<Utc>,
+    ) -> Result<(), String> {
+        let cipher = self
+            .cipher
+            .as_ref()
+            .ok_or_else(|| "session token encryption is not configured".to_string())?;
+        let enc_access = cipher
+            .encrypt(access_token)
+            .map_err(|e| format!("cipher error: {e}"))?;
+        let enc_refresh = match refresh_token {
+            Some(rt) => Some(
+                cipher
+                    .encrypt(rt)
+                    .map_err(|e| format!("cipher error: {e}"))?,
+            ),
+            None => None,
+        };
+
+        let sql = r#"
+            UPDATE bff_sessions
+            SET access_token = $2,
+                refresh_token = COALESCE($3, refresh_token),
+                access_expires_at = $4,
+                last_seen_at = now()
+            WHERE id = $1
+              AND last_seen_at + (idle_timeout_secs || ' seconds')::interval > now()
+              AND created_at   + (absolute_timeout_secs || ' seconds')::interval > now()
+        "#;
+
+        let res = sqlx::query(sql)
+            .bind(session_id)
+            .bind(&enc_access)
+            .bind(&enc_refresh)
+            .bind(access_expires_at)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "pg_session: update_tokens failed");
+                "session store error".to_string()
+            })?;
+
+        if res.rows_affected() == 0 {
+            return Err("session not found or expired".to_string());
+        }
+        Ok(())
+    }
+
     async fn delete_session(&self, id: &str) {
         let sql = "DELETE FROM bff_sessions WHERE id = $1";
         if let Err(e) = sqlx::query(sql).bind(id).execute(&self.pool).await {

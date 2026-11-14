@@ -72,6 +72,15 @@ pub trait SessionStore: Send + Sync {
         session_id: &str,
         workspace_id: Option<&str>,
     ) -> Result<(), String>;
+    /// Atomically replace token material after a refresh. Fails if the
+    /// session does not exist or is expired — never silently succeeds.
+    async fn update_tokens(
+        &self,
+        session_id: &str,
+        access_token: &str,
+        refresh_token: Option<&str>,
+        access_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), String>;
     async fn delete_session(&self, id: &str);
     async fn put_login_txn(&self, tx: LoginTransaction) -> Result<(), String>;
     /// Atomically consumes a login transaction (single-use).
@@ -138,6 +147,31 @@ impl SessionStore for InMemorySessionStore {
             return Err("session expired".to_string());
         }
         s.workspace_id = workspace_id.map(|w| w.to_string());
+        Ok(())
+    }
+
+    async fn update_tokens(
+        &self,
+        session_id: &str,
+        access_token: &str,
+        refresh_token: Option<&str>,
+        access_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), String> {
+        let mut map = self
+            .sessions
+            .lock()
+            .map_err(|_| "store poisoned".to_string())?;
+        let s = map
+            .get_mut(session_id)
+            .ok_or_else(|| "session not found".to_string())?;
+        if s.is_expired() {
+            return Err("session expired".to_string());
+        }
+        s.access_token = access_token.to_string();
+        if let Some(rt) = refresh_token {
+            s.refresh_token = Some(rt.to_string());
+        }
+        s.access_expires_at = access_expires_at;
         Ok(())
     }
 
