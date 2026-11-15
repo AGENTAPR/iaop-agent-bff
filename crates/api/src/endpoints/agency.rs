@@ -92,7 +92,9 @@ pub async fn get_hierarchy(
 
     let mut nodes = Vec::new();
 
-    if let Ok(ancestors) = agency_client
+    // Upstream `ancestors` returns unit IDs only — resolve each to a full
+    // unit via `get_unit` (each call is independently authorized upstream).
+    if let Ok(ancestor_ids) = agency_client
         .get_ancestors(
             assignment.unit_id,
             &principal.access_token,
@@ -100,14 +102,22 @@ pub async fn get_hierarchy(
         )
         .await
     {
-        for anc in ancestors {
-            nodes.push(AgencyHierarchyNodeDto {
-                agency_id: anc.code,
-                agency_name: anc.name,
-                leader_name: None,
-                level: anc.kind,
-                parent_agency_id: anc.parent_id.map(|p| p.to_string()),
-            });
+        for anc_id in ancestor_ids {
+            match agency_client
+                .get_unit(anc_id, &principal.access_token, principal.request_id)
+                .await
+            {
+                Ok(anc) => nodes.push(AgencyHierarchyNodeDto {
+                    agency_id: anc.code,
+                    agency_name: anc.name,
+                    leader_name: None,
+                    level: anc.kind,
+                    parent_agency_id: anc.parent_id.map(|p| p.to_string()),
+                }),
+                Err(e) => {
+                    tracing::warn!(error = %e, unit_id = %anc_id, "Failed to resolve ancestor unit");
+                }
+            }
         }
     }
 

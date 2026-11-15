@@ -113,8 +113,7 @@ pub async fn login(
         .redirect_uri
         .as_deref()
         .filter(|r| {
-            auth.oidc.redirect_uri_allowlist.iter().any(|a| a == r)
-                || *r == auth.oidc.redirect_uri
+            auth.oidc.redirect_uri_allowlist.iter().any(|a| a == r) || *r == auth.oidc.redirect_uri
         })
         .map(str::to_string)
         .unwrap_or_else(|| auth.oidc.redirect_uri.clone());
@@ -195,7 +194,16 @@ pub async fn callback(
         return err(StatusCode::FORBIDDEN, "login transaction binding mismatch");
     }
 
-    let tokens = match exchange_code(&auth.oidc, &code, &tx.pkce_verifier, tx.redirect_uri.as_deref().unwrap_or(&auth.oidc.redirect_uri)).await {
+    let tokens = match exchange_code(
+        &auth.oidc,
+        &code,
+        &tx.pkce_verifier,
+        tx.redirect_uri
+            .as_deref()
+            .unwrap_or(&auth.oidc.redirect_uri),
+    )
+    .await
+    {
         Ok(t) => t,
         Err(OidcError::TokenEndpoint) => {
             return err(
