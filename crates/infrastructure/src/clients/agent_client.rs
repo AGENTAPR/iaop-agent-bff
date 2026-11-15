@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -20,7 +20,6 @@ pub enum AgentClientError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct AgentView {
     pub id: Uuid,
     pub person_id: Uuid,
@@ -37,15 +36,14 @@ pub struct AgentListResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct AppointmentView {
     pub id: Uuid,
     pub agent_id: Uuid,
-    pub appointment_reference: String,
-    pub company_reference: String,
+    pub appointment_reference: Option<String>,
+    pub company_reference: Option<String>,
     pub appointment_type: String,
-    pub effective_from: DateTime<Utc>,
-    pub effective_to: Option<DateTime<Utc>>,
+    pub effective_from: NaiveDate,
+    pub effective_to: Option<NaiveDate>,
     pub status: String,
 }
 
@@ -55,7 +53,6 @@ pub struct AppointmentListResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct IdentityLinkView {
     pub id: Uuid,
     pub agent_id: Uuid,
@@ -256,5 +253,67 @@ impl AgentClient {
             .await
             .map_err(|e| AgentClientError::Serialization(e.to_string()))?;
         Ok(Some(link))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const AGENT_ID: &str = "11111111-2222-3333-4444-555555555555";
+    const LINK_ID: &str = "99999999-8888-7777-6666-555555555555";
+
+    #[test]
+    fn identity_link_view_deserializes_upstream_snake_case() {
+        // Shape emitted by iaop-agent-service IdentityLinkDto (snake_case).
+        let json = format!(
+            r#"{{"id":"{LINK_ID}","agent_id":"{AGENT_ID}","identity_provider":"keycloak","issuer":"https://idp.example/realms/iaop-dev","subject":"4a6ba5c0-3238-4bec-927e-8fb471415099","status":"ACTIVE","linked_at":"2026-11-01T00:00:00Z","unlinked_at":null}}"#
+        );
+        let view: IdentityLinkView = serde_json::from_str(&json).unwrap();
+        assert_eq!(view.agent_id, Uuid::parse_str(AGENT_ID).unwrap());
+        assert_eq!(view.status, "ACTIVE");
+        assert!(view.unlinked_at.is_none());
+    }
+
+    #[test]
+    fn identity_link_view_rejects_camel_case_upstream_drift() {
+        let json = format!(
+            r#"{{"id":"{LINK_ID}","agentId":"{AGENT_ID}","identityProvider":"keycloak","issuer":"i","subject":"s","status":"ACTIVE","linkedAt":"2026-11-01T00:00:00Z","unlinkedAt":null}}"#
+        );
+        assert!(serde_json::from_str::<IdentityLinkView>(&json).is_err());
+    }
+
+    #[test]
+    fn agent_view_deserializes_upstream_shape() {
+        let json = format!(
+            r#"{{"id":"{AGENT_ID}","person_id":"22222222-3333-4444-5555-666666666666","agent_code":"AGT-QA-0001","lifecycle_status":"ACTIVE","version":3,"created_at":"2026-10-01T00:00:00Z"}}"#
+        );
+        let view: AgentView = serde_json::from_str(&json).unwrap();
+        assert_eq!(view.agent_code, "AGT-QA-0001");
+        assert_eq!(view.lifecycle_status, "ACTIVE");
+    }
+
+    #[test]
+    fn agent_list_response_deserializes_upstream_envelope() {
+        let json = format!(
+            r#"{{"data":[{{"id":"{AGENT_ID}","person_id":"22222222-3333-4444-5555-666666666666","agent_code":"AGT-QA-0001","lifecycle_status":"ACTIVE","version":1,"created_at":"2026-10-01T00:00:00Z"}}],"next_cursor":null}}"#
+        );
+        let resp: AgentListResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp.data.len(), 1);
+        assert!(resp.next_cursor.is_none());
+    }
+
+    #[test]
+    fn appointment_view_deserializes_nullable_refs_and_naive_dates() {
+        // Upstream AppointmentDto uses Option refs and NaiveDate.
+        let json = format!(
+            r#"{{"id":"{LINK_ID}","agent_id":"{AGENT_ID}","appointment_reference":null,"company_reference":null,"appointment_type":"APPOINTMENT","effective_from":"2026-01-15","effective_to":null,"status":"ACTIVE"}}"#,
+        );
+        let view: AppointmentView = serde_json::from_str(&json).unwrap();
+        assert!(view.appointment_reference.is_none());
+        assert_eq!(
+            view.effective_from,
+            NaiveDate::from_ymd_opt(2026, 1, 15).unwrap()
+        );
     }
 }

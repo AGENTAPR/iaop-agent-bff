@@ -14,7 +14,8 @@ use uuid::Uuid;
 const TEST_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 async fn pool() -> PgPool {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set — no credentials are embedded in source");
+    let url = std::env::var("DATABASE_URL")
+        .expect("DATABASE_URL must be set — no credentials are embedded in source");
     let pool = PgPool::connect(&url)
         .await
         .expect("failed to connect to iaop_agent_bff database");
