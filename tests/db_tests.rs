@@ -131,6 +131,7 @@ async fn atomic_single_use_login_transactions_in_real_database() {
         nonce: "nonce-12345".to_string(),
         pkce_verifier: "verifier-abcde123456789".to_string(),
         return_to: "/dashboard".to_string(),
+        redirect_uri: None,
         browser_binding: "hash-cookie-binding".to_string(),
         created_at: Instant::now(),
         ttl: Duration::from_secs(300),

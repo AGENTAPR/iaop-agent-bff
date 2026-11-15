@@ -2,7 +2,7 @@
 FROM rust:1.100.0-slim-bookworm AS builder
 WORKDIR /app
 COPY . .
-RUN cargo build --release --locked --bin iaop-agent-bff
+RUN cargo fetch && cargo build --release --bin iaop-agent-bff
 
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \

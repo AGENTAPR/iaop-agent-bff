@@ -28,6 +28,9 @@ pub struct OidcConfig {
     pub client_secret: String,
     /// Exact registered redirect URI, e.g. https://bff/auth/callback
     pub redirect_uri: String,
+    /// Additional allowlisted redirect URIs that may be selected per-login
+    /// (e.g. a portal-proxied callback). Always includes `redirect_uri`.
+    pub redirect_uri_allowlist: Vec<String>,
     /// Allowed post-login return paths (allowlist prefixes).
     pub allowed_return_paths: Vec<String>,
 }
@@ -87,11 +90,17 @@ pub fn random_token() -> String {
 }
 
 /// Builds the Keycloak authorization URL with state, nonce, PKCE.
-pub fn authorize_url(cfg: &OidcConfig, state: &str, nonce: &str, challenge: &str) -> String {
+pub fn authorize_url(
+    cfg: &OidcConfig,
+    state: &str,
+    nonce: &str,
+    challenge: &str,
+    redirect_uri: &str,
+) -> String {
     let q = [
         ("response_type", "code"),
         ("client_id", cfg.client_id.as_str()),
-        ("redirect_uri", cfg.redirect_uri.as_str()),
+        ("redirect_uri", redirect_uri),
         ("scope", "openid profile email"),
         ("state", state),
         ("nonce", nonce),
@@ -135,6 +144,7 @@ pub async fn exchange_code(
     cfg: &OidcConfig,
     code: &str,
     verifier: &str,
+    redirect_uri: &str,
 ) -> Result<TokenResponse, OidcError> {
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -147,7 +157,7 @@ pub async fn exchange_code(
             ("client_id", cfg.client_id.as_str()),
             ("client_secret", cfg.client_secret.as_str()),
             ("code", code),
-            ("redirect_uri", cfg.redirect_uri.as_str()),
+            ("redirect_uri", redirect_uri),
             ("code_verifier", verifier),
         ])
         .send()
@@ -210,6 +220,7 @@ mod tests {
             client_id: "c".into(),
             client_secret: "s".into(),
             redirect_uri: "https://bff/auth/callback".into(),
+            redirect_uri_allowlist: vec![],
             allowed_return_paths: vec!["/".into(), "/dashboard".into()],
         };
         assert_eq!(cfg.sanitize_return_to(Some("/dashboard/x")), "/dashboard/x");
@@ -225,9 +236,10 @@ mod tests {
             client_id: "bff".into(),
             client_secret: "s".into(),
             redirect_uri: "https://bff/auth/callback".into(),
+            redirect_uri_allowlist: vec![],
             allowed_return_paths: vec![],
         };
-        let u = authorize_url(&cfg, "st", "nn", "ch");
+        let u = authorize_url(&cfg, "st", "nn", "ch", "https://bff/auth/callback");
         assert!(u.contains("code_challenge=ch"));
         assert!(u.contains("code_challenge_method=S256"));
         assert!(u.contains("state=st"));
