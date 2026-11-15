@@ -269,8 +269,8 @@ impl SessionStore for PgSessionStore {
 
         let sql = r#"
             INSERT INTO bff_login_transactions
-                (state, nonce, pkce_verifier, return_to, browser_binding, expires_at)
-            VALUES ($1, $2, $3, $4, $5, $6)
+                (state, nonce, pkce_verifier, return_to, redirect_uri, browser_binding, expires_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT (state) DO NOTHING
         "#;
 
@@ -279,6 +279,7 @@ impl SessionStore for PgSessionStore {
             .bind(&tx.nonce)
             .bind(&tx.pkce_verifier)
             .bind(&tx.return_to)
+            .bind(&tx.redirect_uri)
             .bind(&tx.browser_binding)
             .bind(expires_at)
             .execute(&self.pool)
@@ -295,7 +296,7 @@ impl SessionStore for PgSessionStore {
         let sql = r#"
             DELETE FROM bff_login_transactions
             WHERE state = $1 AND expires_at > now()
-            RETURNING state, nonce, pkce_verifier, return_to, browser_binding, expires_at
+            RETURNING state, nonce, pkce_verifier, return_to, redirect_uri, browser_binding, expires_at
         "#;
 
         let row = sqlx::query(sql)
@@ -309,6 +310,7 @@ impl SessionStore for PgSessionStore {
             nonce: row.try_get("nonce").ok()?,
             pkce_verifier: row.try_get("pkce_verifier").ok()?,
             return_to: row.try_get("return_to").ok()?,
+            redirect_uri: row.try_get("redirect_uri").ok().flatten(),
             browser_binding: row.try_get("browser_binding").ok()?,
             created_at: Instant::now(),
             ttl: Duration::from_secs(1),

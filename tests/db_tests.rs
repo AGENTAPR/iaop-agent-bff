@@ -14,9 +14,7 @@ use uuid::Uuid;
 const TEST_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 async fn pool() -> PgPool {
-    let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://postgres:340ce6f29651795482a97e89a2dd36b6f9336f60ef2ed6c4@127.0.0.1:5432/iaop_agent_bff".into()
-    });
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set — no credentials are embedded in source");
     let pool = PgPool::connect(&url)
         .await
         .expect("failed to connect to iaop_agent_bff database");
@@ -131,6 +129,7 @@ async fn atomic_single_use_login_transactions_in_real_database() {
         nonce: "nonce-12345".to_string(),
         pkce_verifier: "verifier-abcde123456789".to_string(),
         return_to: "/dashboard".to_string(),
+        redirect_uri: None,
         browser_binding: "hash-cookie-binding".to_string(),
         created_at: Instant::now(),
         ttl: Duration::from_secs(300),

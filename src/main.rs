@@ -103,6 +103,7 @@ fn build_auth_context(
         client_id: client_id.clone(),
         client_secret,
         redirect_uri,
+        redirect_uri_allowlist: config.oidc_redirect_uri_allowlist.clone(),
         allowed_return_paths: config.oidc_allowed_return_paths.clone(),
     };
     let id_validator = JwtValidator::new(

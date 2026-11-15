@@ -53,6 +53,8 @@ impl AppState {
 #[derive(Debug, Deserialize)]
 pub struct LoginQuery {
     pub return_to: Option<String>,
+    /// Optional alternate redirect URI; must be in OIDC_REDIRECT_URI_ALLOWLIST.
+    pub redirect_uri: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,6 +108,16 @@ pub async fn login(
         Err(r) => return r,
     };
     let return_to = auth.oidc.sanitize_return_to(q.return_to.as_deref());
+    // Allowlisted alternate redirect (e.g. developer-portal-proxied callback).
+    let redirect_uri = q
+        .redirect_uri
+        .as_deref()
+        .filter(|r| {
+            auth.oidc.redirect_uri_allowlist.iter().any(|a| a == r)
+                || *r == auth.oidc.redirect_uri
+        })
+        .map(str::to_string)
+        .unwrap_or_else(|| auth.oidc.redirect_uri.clone());
 
     let state_param = random_token();
     let nonce = random_token();
@@ -119,6 +131,7 @@ pub async fn login(
         nonce: nonce.clone(),
         pkce_verifier: verifier,
         return_to,
+        redirect_uri: Some(redirect_uri.clone()),
         browser_binding: binding.clone(),
         created_at: std::time::Instant::now(),
         ttl: TXN_TTL,
@@ -127,7 +140,7 @@ pub async fn login(
         return err(StatusCode::INTERNAL_SERVER_ERROR, "session store error");
     }
 
-    let url = oidc::authorize_url(&auth.oidc, &state_param, &nonce, &challenge);
+    let url = oidc::authorize_url(&auth.oidc, &state_param, &nonce, &challenge, &redirect_uri);
     let mut resp = Redirect::to(&url).into_response();
     resp.headers_mut().append(
         header::SET_COOKIE,
@@ -182,7 +195,7 @@ pub async fn callback(
         return err(StatusCode::FORBIDDEN, "login transaction binding mismatch");
     }
 
-    let tokens = match exchange_code(&auth.oidc, &code, &tx.pkce_verifier).await {
+    let tokens = match exchange_code(&auth.oidc, &code, &tx.pkce_verifier, tx.redirect_uri.as_deref().unwrap_or(&auth.oidc.redirect_uri)).await {
         Ok(t) => t,
         Err(OidcError::TokenEndpoint) => {
             return err(
