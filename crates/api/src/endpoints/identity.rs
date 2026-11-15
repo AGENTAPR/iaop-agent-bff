@@ -200,7 +200,9 @@ pub async fn resolve_workspace_resolution(
                             is_default: true,
                         });
 
-                        if let Ok(ancestors) = agency_client
+                        // Upstream returns ancestor unit IDs only; resolve
+                        // each via get_unit (independently authorized upstream).
+                        if let Ok(ancestor_ids) = agency_client
                             .get_ancestors(
                                 assignment.unit_id,
                                 &principal.access_token,
@@ -208,14 +210,22 @@ pub async fn resolve_workspace_resolution(
                             )
                             .await
                         {
-                            for anc in ancestors {
-                                workspaces.push(WorkspaceDto {
-                                    id: anc.id.to_string(),
-                                    name: anc.name,
-                                    agency_code: Some(anc.code),
-                                    role: "PARENT_UNIT".to_string(),
-                                    is_default: false,
-                                });
+                            for anc_id in ancestor_ids {
+                                match agency_client
+                                    .get_unit(anc_id, &principal.access_token, principal.request_id)
+                                    .await
+                                {
+                                    Ok(anc) => workspaces.push(WorkspaceDto {
+                                        id: anc.id.to_string(),
+                                        name: anc.name,
+                                        agency_code: Some(anc.code),
+                                        role: "PARENT_UNIT".to_string(),
+                                        is_default: false,
+                                    }),
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, unit_id = %anc_id, "Failed to resolve ancestor unit for workspace");
+                                    }
+                                }
                             }
                         }
                     }
